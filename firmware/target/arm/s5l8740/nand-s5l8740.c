@@ -73,7 +73,23 @@
 #define DMA_C6C             16
 #define DMA_KICK            0xfff5      /* NOT 0x80000, which is a reset */
 
-#define CS_POLL_US          200000
+/*
+ * Completion budget for one sequencer kick.
+ *
+ * Was 200000 (200 ms), which is roughly 2000x how long a NAND page read
+ * actually takes and ten times what the Linux driver allows on the same
+ * silicon -- it polls 2000 iterations of udelay(10), so 20 ms, and only
+ * stretches to 200 ms on the no-IRQ fallback path.
+ *
+ * The number does not matter when reads succeed; it decides entirely how long
+ * a FAILING scan takes to admit it. Pass one is 8352 superblock reads, so at
+ * 200 ms apiece a device that never answers costs 28 minutes per pass, twice,
+ * with a motionless logo on screen. At 20 ms it is under three minutes, and
+ * the cold-failure budget in ftl_recover() cuts the common case to about a
+ * second. Linux mounts this disk in 30 seconds; nothing here should be
+ * allowed to take an hour to reach the same conclusion.
+ */
+#define CS_POLL_US          20000
 
 /*
  * DMA buffers. These are accessed through the uncached DRAM alias, so the

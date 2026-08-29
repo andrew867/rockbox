@@ -22,6 +22,7 @@
 #include "config.h"
 #include "system.h"
 #include "kernel.h"
+#include "lcd.h"
 #include "nand-s5l8740.h"
 #include "ftl-s5l8740.h"
 
@@ -488,10 +489,59 @@ static bool find_fat_base(void)
     return false;
 }
 
+/*
+ * Mount progress, on screen.
+ *
+ * The scan is 8,352 superblock reads in pass one alone (2088 blocks x 4
+ * banks), and a read that gets no answer costs CS_POLL_US -- 200 ms -- before
+ * it gives up. If the NAND is not responding, that is 28 minutes per pass and
+ * two passes to go, with the Rockbox logo sitting motionless the whole time.
+ * It is not hung, but nothing on the device can tell you that, and "wait an
+ * hour to find out" is not a debugging step.
+ *
+ * So the count goes on the glass. A moving number distinguishes slow from
+ * stopped, which is the single most useful fact during a mount and the one
+ * thing the beacons could never express -- they can say WHERE the boot is,
+ * never whether it is still moving.
+ *
+ * Only the top band is repainted, and only every PROG_EVERY units. Full frames
+ * are 103,680 PIO pixel writes on this target; repainting one per block would
+ * make the display, not the NAND, the reason the mount was slow.
+ */
+#define PROG_EVERY      64
+#define PROG_BAND_H     40
+
+static void ftl_progress_paint(void)
+{
+    lcd_clear_display();
+    lcd_putsf(0, 0, "FTL %s", prog_phase);
+    lcd_putsf(0, 1, "%u / %u", prog_cur, prog_total);
+    lcd_update_rect(0, 0, LCD_WIDTH, PROG_BAND_H);
+}
+
+/*
+ * How many reads may fail back-to-back, from a cold start, before we accept
+ * that the NAND is not talking to us.
+ *
+ * A device with data on it answers its very first BTOC read. Blank
+ * superblocks return a page and are classified as free -- they do not fail.
+ * So a long unbroken run of hard failures before ANY success does not mean
+ * "an empty device", it means the controller is not responding, and every
+ * further attempt buys another 200 ms of the same answer.
+ *
+ * 64 is generous enough to ride out a bad region at the start of the scan and
+ * cheap enough to bail in about thirteen seconds instead of half an hour.
+ * Once a single read has succeeded the budget is retired entirely: from that
+ * point failures are ordinary bad blocks and must not abort a real mount.
+ */
+#define COLD_FAIL_LIMIT 64
+
 int ftl_recover(void)
 {
     unsigned ce, cau, block;
     unsigned scanned = 0;
+    unsigned cold_fails = 0;
+    bool any_read_ok = false;
 
     if (!nand_hw_present())
         return -1;
@@ -520,10 +570,20 @@ int ftl_recover(void)
                 uint64_t weave = 0;
 
                 prog_cur = ++scanned;
+                if ((scanned % PROG_EVERY) == 0)
+                    ftl_progress_paint();
 
                 if (nand_cs_phys_read(ce, cau, block, NAND_BTOC_PAGE,
-                                      &scratch))
+                                      &scratch)) {
+                    if (!any_read_ok && ++cold_fails >= COLD_FAIL_LIMIT) {
+                        prog_phase = "no answer";
+                        ftl_progress_paint();
+                        return -1;
+                    }
                     continue;
+                }
+
+                any_read_ok = true;
 
                 if (page_blank(&scratch))
                     continue;   /* free superblock */
@@ -558,6 +618,7 @@ int ftl_recover(void)
     prog_cur = 0;
     prog_total = stat_sbs_open;
 
+    prog_phase = "btoc";
     if (stat_sbs_open) {
         unsigned done = 0;
 
