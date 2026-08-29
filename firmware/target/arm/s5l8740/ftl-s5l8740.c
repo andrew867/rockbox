@@ -1006,37 +1006,73 @@ static int cxt_load_l2v(const uint8_t *d, uint64_t weave)
     return 0;
 }
 
-/* Walk one CXT superblock in VBA order until the END tag. */
-static int cxt_load_sb(unsigned ce, unsigned cau, unsigned block,
-                       uint64_t weave)
+/*
+ * Walk a checkpoint as ONE superblock spanning all four planes.
+ *
+ * A checkpoint is not a per-plane object. The same virtual block on every
+ * (ce, cau) plane is one superblock, and its records run in native VBA order
+ * -- page 0 across all four planes, then page 1:
+ *
+ *   vblock 989  ofs 0..3   plane 0
+ *               ofs 4..7   plane 1
+ *               ofs 8..11  plane 2
+ *               ofs 12..15 plane 3
+ *               ofs 16..   plane 0, page 1
+ *
+ * This used to read one plane end to end -- every record of plane 0, then
+ * every record of plane 1 -- which is the wrong order and only a quarter of
+ * the data. The L2V parse cannot survive that: every record declares the LBA
+ * it continues from and one whose declared start does not match the running
+ * cursor is rejected, so out-of-order records are dropped or attached at the
+ * wrong logical position.
+ *
+ * It also made a single checkpoint look like four candidates with four
+ * weaves, which reads like the map being a generation stale when it is really
+ * being assembled out of order.
+ *
+ * We already number VBAs the way the FTL does, so the walk is just an offset
+ * loop through vba_to_phys(). One page read serves four consecutive offsets,
+ * so this costs the same reads as before and gets all four planes.
+ */
+static int cxt_load_vblock(unsigned vblock, uint64_t weave)
 {
-    unsigned pg, s;
+    int last_ce = -1, last_cau = -1, last_page = -1;
+    unsigned ofs;
 
     cxt_lba_valid = false;
     cxt_next_lba = 0;
 
-    for (pg = 0; pg < NAND_PAGES_PER_BLOCK; pg++) {
-        if (nand_cs_phys_read(ce, cau, block, pg, &scratch))
-            return -1;
+    for (ofs = 0; ofs < VBA_PER_SB; ofs++) {
+        uint32_t vba = (uint32_t)vblock * VBA_PER_SB + ofs;
+        uint8_t ce, cau, page, slot;
+        uint16_t blk;
+        const uint8_t *m;
 
-        if ((pg % 8) == 0) {
-            prog_cur = pg;
+        vba_to_phys(vba, &ce, &cau, &blk, &page, &slot);
+
+        if (ce != last_ce || cau != last_cau || page != last_page) {
+            if (nand_cs_phys_read(ce, cau, blk, page, &scratch))
+                return -1;
+
+            last_ce = ce;
+            last_cau = cau;
+            last_page = page;
+
+            prog_cur = ofs;
             ftl_progress_paint();
         }
 
-        for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
-            const uint8_t *m = scratch.meta_raw[s];
+        m = scratch.meta_raw[slot];
 
-            if (m[0] != NAND_META_TYPE_SFTL_CXT)
-                continue;
-            if (m[1] == CXT_TAG_END)
-                return 0;
-            if (m[1] != CXT_TAG_L2V)
-                continue;
+        if (m[0] != NAND_META_TYPE_SFTL_CXT)
+            continue;
+        if (m[1] == CXT_TAG_END)
+            return 0;
+        if (m[1] != CXT_TAG_L2V)
+            continue;
 
-            if (cxt_load_l2v(scratch.data[s], weave))
-                return -1;
-        }
+        if (cxt_load_l2v(scratch.data[slot], weave))
+            return -1;
     }
 
     return 0;
@@ -1046,16 +1082,11 @@ static int cxt_load_sb(unsigned ce, unsigned cau, unsigned block,
  * How many reads may fail back-to-back, from a cold start, before we accept
  * that the NAND is not talking to us.
  *
- * A device with data on it answers its very first BTOC read. Blank
- * superblocks return a page and are classified as free -- they do not fail.
- * So a long unbroken run of hard failures before ANY success does not mean
- * "an empty device", it means the controller is not responding, and every
- * further attempt buys another 200 ms of the same answer.
- *
- * 64 is generous enough to ride out a bad region at the start of the scan and
- * cheap enough to bail in about thirteen seconds instead of half an hour.
- * Once a single read has succeeded the budget is retired entirely: from that
- * point failures are ordinary bad blocks and must not abort a real mount.
+ * A device with data on it answers its very first read. Blank superblocks
+ * return a page and are classified as free -- they do not fail. So a long
+ * unbroken run of hard failures before ANY success does not mean "an empty
+ * device", it means the controller is not responding, and every further
+ * attempt buys another timeout of the same answer.
  */
 #define COLD_FAIL_LIMIT 64
 
@@ -1172,13 +1203,31 @@ static bool sb_sweep_page0(void)
                         cxt_sbs[cxt_sb_count].cau   = (uint8_t)cau;
                         cxt_sb_count++;
                     }
-                    if (m[1] == CXT_TAG_BASE && cxt_base_count < CXT_MAX_SB) {
-                        cxt_bases[cxt_base_count].block = (uint16_t)block;
-                        cxt_bases[cxt_base_count].ce    = (uint8_t)ce;
-                        cxt_bases[cxt_base_count].cau   = (uint8_t)cau;
-                        cxt_base_weaves[cxt_base_count] =
-                            scratch.meta[0].weave;
-                        cxt_base_count++;
+                    if (m[1] == CXT_TAG_BASE) {
+                        /*
+                         * One candidate per VIRTUAL BLOCK, not per plane.
+                         * All four planes of a checkpoint carry the BASE tag,
+                         * and counting them separately turns one checkpoint
+                         * into four rival candidates -- three of which then
+                         * look like older generations that contributed
+                         * nothing. Keep the highest weave of the planes.
+                         */
+                        unsigned k;
+
+                        for (k = 0; k < cxt_base_count; k++)
+                            if (cxt_bases[k].block == (uint16_t)block)
+                                break;
+
+                        if (k < cxt_base_count) {
+                            if (scratch.meta[0].weave > cxt_base_weaves[k])
+                                cxt_base_weaves[k] = scratch.meta[0].weave;
+                        } else if (cxt_base_count < CXT_MAX_SB) {
+                            cxt_bases[k].block = (uint16_t)block;
+                            cxt_bases[k].ce    = (uint8_t)ce;
+                            cxt_bases[k].cau   = (uint8_t)cau;
+                            cxt_base_weaves[k] = scratch.meta[0].weave;
+                            cxt_base_count++;
+                        }
                     }
                     continue;
                 }
@@ -1216,7 +1265,7 @@ static bool cxt_load_newest(void)
         }
 
         prog_phase = "cxt load";
-        prog_total = NAND_PAGES_PER_BLOCK;
+        prog_total = VBA_PER_SB;
         prog_cur = 0;
         ftl_progress_paint();
 
@@ -1224,9 +1273,8 @@ static bool cxt_load_newest(void)
         stat_mapped = 0;
         ranges_overflowed = false;
 
-        if (cxt_load_sb(cxt_bases[best].ce, cxt_bases[best].cau,
-                        cxt_bases[best].block, cxt_base_weaves[best]) == 0 &&
-            range_count) {
+        if (cxt_load_vblock(cxt_bases[best].block,
+                            cxt_base_weaves[best]) == 0 && range_count) {
             cxt_weave = cxt_base_weaves[best];
             cxt_loaded = true;
             return true;
