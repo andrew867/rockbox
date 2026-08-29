@@ -291,7 +291,25 @@ static inline void usb_slave_mode(bool on)
         /* Entered exclusive mode */
         rc = disk_mount_all();
         if(rc <= 0) /* no partition */
+        {
+#ifdef HAVE_OPTIONAL_STORAGE
+            /*
+             * Losing the disk must not take the firmware with it.
+             *
+             * This panics on every USB event when nothing mounts, which on a
+             * device whose storage is still being brought up means a port
+             * that cannot survive plugging in a cable -- and the panic
+             * replaces the mount diagnostics with its own backtrace, so the
+             * one screen that would have explained the failure is gone.
+             *
+             * Rockbox runs perfectly well with no volume: it just has nothing
+             * to browse. Carrying on and saying so beats dying.
+             */
+            (void)rc;
+#else
             panicf("mount: %d",rc);
+#endif
+        }
     }
 }
 

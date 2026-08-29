@@ -22,6 +22,7 @@
 #include "storage.h"
 #include "nand-s5l8740.h"
 #include "ftl-s5l8740.h"
+#include "lcd.h"
 #include "boot-beacon.h"
 
 /*
@@ -68,17 +69,46 @@ int nand_init(void)
      */
     beacon_mark(BEACON_WHITE);
 
-    if (ftl_recover() == 0) {
-        storage_ready = true;
-        beacon_mark(BEACON_BLUE);
-    } else {
-        /*
-         * Not fatal here. Reporting a clean "no storage" lets the firmware
-         * finish booting and say so on a working screen, which is far more
-         * useful than refusing to start.
-         */
-        beacon_mark(BEACON_RED);
+    storage_ready = (ftl_recover() == 0);
+
+    /*
+     * Report the mount, pass or fail, and hold it long enough to read.
+     *
+     * A failed mount used to be a single word on the progress screen, and the
+     * next thing that happened was a panic on the following USB event -- by
+     * which point every number that would have explained it was gone. These
+     * five lines separate the cases that look identical from the outside:
+     *
+     *   no context, and a written-superblock count near zero
+     *       the sweep found nothing; a NAND or classification problem
+     *   no context, but plenty of written superblocks
+     *       the context failed to parse and the scan fallback ran
+     *   context loaded, ranges near zero
+     *       the context parsed but produced no map
+     *   ranges present, phase "no-bpb"
+     *       the map is built and FAT does not recognise it -- an L2V or
+     *       address-translation problem, not a storage one
+     */
+    {
+        unsigned ranges = 0, mapped = 0, closed = 0, open = 0;
+        unsigned written = 0, empty = 0, replayed = 0;
+        bool cxt = false;
+
+        ftl_get_stats(&ranges, &mapped, &closed, &open);
+        ftl_get_cxt_stats(&cxt, &written, &empty, &replayed);
+
+        lcd_clear_display();
+        lcd_putsf(0, 0, "FTL %s", ftl_last_phase());
+        lcd_putsf(0, 1, "cxt %s  wr %u", cxt ? "yes" : "NO", written);
+        lcd_putsf(0, 2, "empty %u  rpl %u", empty, replayed);
+        lcd_putsf(0, 3, "rng %u  map %u", ranges, mapped);
+        lcd_putsf(0, 4, "cl %u  op %u", closed, open);
+        lcd_update();
+
+        sleep(5 * HZ);
     }
+
+    beacon_mark(storage_ready ? BEACON_BLUE : BEACON_RED);
 
     last_disk_activity = current_tick;
     return 0;

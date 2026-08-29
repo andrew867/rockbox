@@ -63,6 +63,22 @@
  */
 #define HAVE_USB_SOFT_DETACH
 
+/*
+ * Storage may legitimately be absent while the FTL is being brought up, and a
+ * USB cable event must not panic the firmware because of it.
+ */
+#define HAVE_OPTIONAL_STORAGE
+
+/*
+ * Do not watch for USB cable events at boot, for now.
+ *
+ * A cable event is the loudest thing that can happen during bring-up: it
+ * takes storage from the firmware and gives it to the host. It is also where
+ * a failed mount surfaces, so attaching a cable to power the device replaces
+ * the FTL diagnostics with a USB teardown. Off until the volume mounts.
+ */
+#define N31_USB_OFF_AT_BOOT
+
 #define LCD_DEPTH  16
 #define LCD_PIXELFORMAT RGB565
 

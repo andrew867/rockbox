@@ -1148,6 +1148,29 @@ uint32_t ftl_disk_sectors(void)
     return disk_sector_count;
 }
 
+/*
+ * The facts that decide whether a mount failure is a context problem, a scan
+ * problem or a FAT problem. Without these a failed mount is one word on a
+ * screen and everything after it is guesswork.
+ */
+void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
+                       unsigned *replayed)
+{
+    if (loaded)
+        *loaded = cxt_loaded;
+    if (written)
+        *written = sb_list_count;
+    if (empty)
+        *empty = stat_probe_empty;
+    if (replayed)
+        *replayed = prog_found;
+}
+
+const char *ftl_last_phase(void)
+{
+    return prog_phase;
+}
+
 void ftl_get_stats(unsigned *rangesp, unsigned *mapped, unsigned *sbs_closed,
                    unsigned *sbs_open)
 {

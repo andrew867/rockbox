@@ -68,6 +68,10 @@ uint32_t ftl_fat_base_lba(void);
 uint32_t ftl_disk_sectors(void);
 
 /* Diagnostics for the debug screen. */
+void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
+                       unsigned *replayed);
+const char *ftl_last_phase(void);
+
 void ftl_get_stats(unsigned *ranges, unsigned *mapped, unsigned *sbs_closed,
                    unsigned *sbs_open);
 const char *ftl_progress_phase(unsigned *cur, unsigned *total);

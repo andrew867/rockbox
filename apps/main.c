@@ -197,7 +197,27 @@ int main(void)
      * Must be done before any code uses the multi-screen API */
 #ifdef HAVE_USBSTACK
     /* All threads should be created and public queues registered by now */
+#ifdef N31_USB_OFF_AT_BOOT
+    /*
+     * USB monitoring is off while the FTL is being brought up.
+     *
+     * Nothing here is broken -- the stack works, the gadget enumerates and
+     * Rockbox's USB screen comes up. The problem is that a cable event is the
+     * loudest thing that can happen during boot: it takes storage away from
+     * the firmware, hands it to the host, and takes it back again on unplug.
+     * When the volume does not mount, that path is also where the failure
+     * surfaces, so plugging in a cable replaces the mount diagnostics with a
+     * USB teardown and there is no way to read what actually went wrong.
+     *
+     * Leaving it off keeps the device on the bench: the disk stays ours, the
+     * FTL summary stays on screen, and the machine can be powered from USB
+     * without the firmware reacting to it. Remove this once the volume mounts
+     * reliably; usb_soft_detach() then covers the same need from the UI.
+     */
+    (void)0;
+#else
     usb_start_monitoring();
+#endif
 #endif
 
 #if !defined(DISABLE_ACTION_REMAP) && defined(CORE_KEYREMAP_FILE)
