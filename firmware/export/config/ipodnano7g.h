@@ -95,6 +95,12 @@
  * HAVE_CS42L81 and a real firmware/drivers/audio/cs42l81.c.
  */
 #define HAVE_DUMMY_CODEC
+/*
+ * With no real codec there is no hardware volume control, so volume is
+ * applied in software. This also becomes the fallback once cs42l81 lands
+ * if its analog gain path turns out to be unusable.
+ */
+#define HAVE_SW_VOLUME_CONTROL
 
 /* Define this for LCD backlight available -- MMIO @0x3E000000 */
 #define HAVE_BACKLIGHT

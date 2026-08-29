@@ -30,6 +30,13 @@ static long last_disk_activity = -1;
  * data area, and there is no recovery short of a restore.
  */
 
+int nand_event(long id, intptr_t data)
+{
+    (void)id;
+    (void)data;
+    return 0;
+}
+
 long nand_last_disk_activity(void)
 {
     return last_disk_activity;
