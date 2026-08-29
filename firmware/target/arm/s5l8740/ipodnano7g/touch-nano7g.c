@@ -110,9 +110,31 @@ static void nimbus_map_coords(int16_t rawx, int16_t rawy, int *x, int *y)
     *y = yy;
 }
 
+/*
+ * All transfers go through the SPI driver rather than poking SPI2 directly.
+ *
+ * The Linux driver originally drove the registers itself and did not treat a
+ * receive timeout as a failure: it read RXDATA either way and returned
+ * success, so when the ready bit never set, the FIFO's previous contents came
+ * back as if they were a reply. That is where the repeating 0x4f81 came from
+ * -- the part appeared to answer while telling us nothing.
+ *
+ * spi_transfer() now fails on timeout instead, so a dead bus reports as dead.
+ *
+ * The receive buffer is always supplied even for transmit-only frames: the
+ * part clocks a reply out regardless, and leaving it undrained overruns the
+ * RX FIFO partway through a long burst.
+ */
 static int nimbus_xfer(int len)
 {
     return spi_transfer(SPI_PORT_TOUCH, txbuf, rxbuf, len);
+}
+
+/* A burst that keeps the part selected, for frames spanning several calls. */
+static int nimbus_xfer_hold(int len) __attribute__((unused));
+static int nimbus_xfer_hold(int len)
+{
+    return spi_transfer_cs(SPI_PORT_TOUCH, txbuf, rxbuf, len, false);
 }
 
 /* The 16-byte probe frame: magic, 01 01, checksum at the tail. */
@@ -227,6 +249,12 @@ bool touch_init(void)
         }
         sleep(HZ / 50);
     }
+
+    /*
+     * Ten clean failures, not ten stale-FIFO successes. spi_transfer() now
+     * propagates receive timeouts, so reaching here means the part genuinely
+     * did not answer rather than that we misread the status bits.
+     */
 
     /*
      * TODO: firmware upload. The stock path pushes GrapeFirmware.bin (shipped
