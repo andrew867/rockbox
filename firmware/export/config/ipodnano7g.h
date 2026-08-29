@@ -78,9 +78,14 @@
 #define CONFIG_CODEC SWCODEC
 
 /*
- * TODO: the D1830 PMIC has an RTC but the register map is not RE'd yet.
+ * RTC: a plain little-endian 32-bit seconds counter in D1830 registers
+ * 124..127 (RetailOS sub_16517E). There is no separate RTC chip.
+ *
+ * The epoch the stock firmware uses is NOT established -- the driver treats
+ * the counter as Unix time, which is self-consistent but will not
+ * necessarily agree with what RetailOS displays.
  */
-#define CONFIG_RTC 0
+#define CONFIG_RTC RTC_D1830
 
 /*
  * Audio codec: Cirrus CS42L81 / Apple 338S1146 on SPI0 @0x3C300000.

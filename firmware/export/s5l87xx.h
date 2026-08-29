@@ -128,6 +128,27 @@
 #define BACKLIGHT_BASE  0x3E000000
 
 /*
+ * TV-Out / DisplayPort. Three windows, all OBSERVED rather than CONFIRMED.
+ *
+ * RetailOS has a real TV-Out HAL with an explicit DisplayPort signal mode
+ * (TVOutControl::kTV_DISPLAYPORT == 2), surfaced over iAP as SetDisplayPort:
+ *
+ *   0x39100000  video planes and framebuffer addresses (FB windows @+0x28..+0x34)
+ *   0x39200000  mode and plane enables (@+0x04 bitfield)
+ *   0x39300000  timing, PHY tables and HPD; 3 LUT banks @+0x200/+0x2C0/+0x320,
+ *               and the DP-only poke @+0x280
+ *
+ * These are defined for completeness and for the debug screens. There is
+ * deliberately NO driver: the reverse engineering has the register windows
+ * and their roles but not a working init sequence, and writing a speculative
+ * one to a display PHY is exactly the kind of guess this port does not make.
+ * Anything here would need the PHY/LUT programming order recovered first.
+ */
+#define TVOUT0_BASE     0x39100000
+#define TVOUT1_BASE     0x39200000
+#define TVOUT2_BASE     0x39300000
+
+/*
  * GPIO. Bank stride 32, eight 4-bit function nibbles per bank in PCON.
  * This is NOT the s5l8702 group model -- see gpio-s5l8740.c.
  */
