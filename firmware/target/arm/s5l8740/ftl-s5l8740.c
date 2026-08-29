@@ -102,6 +102,34 @@ static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
 static unsigned prog_found, prog_want;
 
+/*
+ * Open superblocks found during pass one.
+ *
+ * Pass one already visits every superblock and already decides which ones are
+ * open -- that is the entire purpose of the sweep. It then threw the
+ * coordinates away, and pass two re-read all 8352 BTOC pages to work out the
+ * same answer a second time. Two identical full sweeps of the same NAND to
+ * learn a fact the first one had in hand.
+ *
+ * Writing down four bytes per hit removes the second sweep completely. Open
+ * superblocks are the ones currently being written, so there are normally a
+ * handful; 512 is far above any plausible count and costs 2 KB.
+ *
+ * If it ever does overflow, pass two falls back to the old full sweep rather
+ * than silently rebuilding an incomplete map. Slow and correct beats fast and
+ * missing half the volume.
+ */
+#define OPEN_SB_MAX     512
+
+static struct open_sb_ref {
+    uint16_t block;
+    uint8_t  ce;
+    uint8_t  cau;
+} open_sbs[OPEN_SB_MAX];
+
+static unsigned open_sb_count;
+static bool open_sb_overflow;
+
 /* One page's worth of scratch, reused throughout. */
 static struct nand_cs_page scratch;
 
@@ -552,6 +580,8 @@ int ftl_recover(void)
     range_count = 0;
     ranges_overflowed = false;
     stat_sbs_closed = stat_sbs_open = stat_mapped = 0;
+    open_sb_count = 0;
+    open_sb_overflow = false;
     ftl_is_ready = false;
 
     prog_phase = "scan";
@@ -606,11 +636,22 @@ int ftl_recover(void)
                                 ce, cau, block, weave);
                 } else {
                     /*
-                     * Written but no BTOC: still open. Deferred to pass two
-                     * so the cheap classification finishes first and the
-                     * progress bar stays honest.
+                     * Written but no BTOC: still open. The page-by-page
+                     * rebuild is deferred to pass two so the cheap
+                     * classification finishes first, but the COORDINATES are
+                     * recorded here -- they are already in hand, and pass two
+                     * used to re-read the whole device to recover them.
                      */
                     stat_sbs_open++;
+
+                    if (open_sb_count < OPEN_SB_MAX) {
+                        open_sbs[open_sb_count].block = (uint16_t)block;
+                        open_sbs[open_sb_count].ce    = (uint8_t)ce;
+                        open_sbs[open_sb_count].cau   = (uint8_t)cau;
+                        open_sb_count++;
+                    } else {
+                        open_sb_overflow = true;
+                    }
                 }
             }
         }
@@ -639,7 +680,31 @@ int ftl_recover(void)
     prog_want = stat_sbs_open;
 
     prog_phase = "btoc";
-    if (stat_sbs_open) {
+
+    /*
+     * Fast path: rebuild straight from the list pass one wrote down.
+     *
+     * This is the difference between one sweep of the NAND and two. The old
+     * path re-read every BTOC page on the device to re-find superblocks that
+     * had already been identified minutes earlier, which roughly doubled
+     * mount time for no new information.
+     *
+     * The full sweep survives below purely for the overflow case.
+     */
+    if (stat_sbs_open && !open_sb_overflow) {
+        unsigned i;
+
+        prog_total = open_sb_count;
+        prog_want = 0;
+
+        for (i = 0; i < open_sb_count; i++) {
+            prog_cur = i + 1;
+            ftl_progress_paint();
+            rebuild_open_sb(open_sbs[i].ce, open_sbs[i].cau,
+                            open_sbs[i].block);
+        }
+    }
+    else if (stat_sbs_open) {
         unsigned done = 0;
         unsigned swept = 0;
 
