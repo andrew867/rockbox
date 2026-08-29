@@ -1705,6 +1705,7 @@ target/arm/s5l8740/ipodnano7g/power-nano7g.c
 target/arm/s5l8740/ipodnano7g/nand-nano7g.c
 target/arm/s5l8740/ipodnano7g/accel-nano7g.c
 target/arm/s5l8740/ipodnano7g/tristar-nano7g.c
+target/arm/s5l8740/ipodnano7g/mikeybus-nano7g.c
 target/arm/s5l8740/ipodnano7g/touch-nano7g.c
 #if (CONFIG_RTC == RTC_D1830)
 target/arm/s5l8740/ipodnano7g/rtc-nano7g.c

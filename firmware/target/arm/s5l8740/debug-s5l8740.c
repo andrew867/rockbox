@@ -15,6 +15,9 @@
 #include "button.h"
 #include "gpio-s5l8740.h"
 #include "pmu-target.h"
+#include "mikeybus-nano7g.h"
+#include "tristar-nano7g.h"
+#include "spi-s5l8740.h"
 
 /*
  * Deliberately read-only. During bring-up the debug screens are one of the few
@@ -50,6 +53,67 @@ bool dbg_hw_info(void)
         lcd_putsf(0, line++, "PMIC r7:  %02x", pmu_read(0x07));
         lcd_putsf(0, line++, "PMIC r8:  %02x", pmu_read(0x08));
         lcd_putsf(0, line++, "VBAT:     %d mV", pmu_read_battery_voltage());
+
+        lcd_update();
+
+        if (action_userabort(HZ / 5))
+            break;
+    }
+
+    lcd_setfont(FONT_UI);
+    return false;
+}
+
+/*
+ * MikeyBus raw stream.
+ *
+ * This screen exists for one specific job: the inline remote's button codes
+ * are inference rather than RE, and this shows the actual bytes arriving so
+ * they can be read off a device with a remote plugged in. Press each button
+ * in turn and the encoding falls out in a couple of minutes.
+ */
+bool dbg_mikeybus(void)
+{
+    lcd_setfont(FONT_SYSFIXED);
+
+    while (1) {
+        const uint8_t *stream;
+        unsigned head, rx, pkts;
+        int line = 0;
+        int i;
+
+        mikeybus_poll();
+
+        lcd_clear_display();
+        lcd_putsf(0, line++, "MikeyBus (UART2)");
+
+        mikeybus_get_counters(&rx, &pkts);
+        lcd_putsf(0, line++, "rx=%u packets=%u", rx, pkts);
+        lcd_putsf(0, line++, "jack=%d model=%02x",
+                  mikeybus_jack_present(), mikeybus_model());
+        lcd_putsf(0, line++, "%s", mikeybus_model_name(mikeybus_model()));
+        line++;
+
+        lcd_putsf(0, line++, "last 32 stream bytes:");
+        stream = mikeybus_raw_stream(&head);
+        for (i = 0; i < 4; i++) {
+            int j;
+            char buf[32];
+            char *p = buf;
+
+            for (j = 0; j < 8; j++) {
+                unsigned idx = (head + 256 - 32 + i * 8 + j) % 256;
+
+                p += snprintf(p, 4, "%02x ", stream[idx]);
+            }
+            lcd_putsf(0, line++, "%s", buf);
+        }
+
+        line++;
+        lcd_putsf(0, line++, "Lightning: %s", tristar_accessory_name());
+        lcd_putsf(0, line++, "SPI0 fam=%d SPI2 fam=%d",
+                  spi_get_status_family(SPI_PORT_CODEC),
+                  spi_get_status_family(SPI_PORT_TOUCH));
 
         lcd_update();
 

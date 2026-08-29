@@ -22,6 +22,7 @@
 #include "pmu-target.h"
 #include "touchscreen.h"
 #include "touch-nano7g.h"
+#include "mikeybus-nano7g.h"
 
 /*
  * Volume keys are SoC pads 40 and 41, active low.
@@ -44,10 +45,11 @@
 void button_init_device(void)
 {
     /*
-     * Nothing to configure. The volume pads are already inputs after the SEC
-     * pinmux that U-Boot replays, and the PMIC keys are polled over I2C by
-     * pmu_read_buttons().
+     * The volume pads are already inputs after the SEC pinmux that U-Boot
+     * replays, and the PMIC keys are polled over I2C by pmu_read_buttons().
+     * MikeyBus needs its UART brought up, though.
      */
+    mikeybus_init();
 }
 
 /*
@@ -65,6 +67,13 @@ int button_read_device(int *data)
         btn |= BUTTON_VOL_DOWN;
 
     btn |= pmu_read_buttons();
+
+    /*
+     * Inline remote on the headset cable. Polled here rather than on its own
+     * tick because the UART is polled anyway and the packets are tiny.
+     */
+    mikeybus_poll();
+    btn |= mikeybus_read_buttons();
 
     if (touchscreen_read_device(&x, &y)) {
         /* touchscreen_to_pixels() fills *data itself, in whichever form the
