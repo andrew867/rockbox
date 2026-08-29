@@ -43,6 +43,25 @@ static bool storage_ready;
 /* Cleared until the volume is mounted; gates the boot-time read counter. */
 bool mount_done;
 
+/*
+ * One-line trace for the mount path.
+ *
+ * disk_mount_all() stops before issuing a single read, so the read counter --
+ * which only exists inside nand_read_sectors() -- can never fire. The failure
+ * is in the disk layer above storage, and nothing there says anything.
+ *
+ * No sleep: these are called in sequence and a full frame is already ~20ms,
+ * which is long enough to see the sequence stop and short enough not to
+ * change the timing of what is being measured.
+ */
+void n31_trace(const char *tag)
+{
+    lcd_clear_display();
+    lcd_putsxy(4, 4,  "N7G disk");
+    lcd_putsxy(4, 20, tag);
+    lcd_update();
+}
+
 /* Points at the trace counter while the mount is running; NULL after. */
 static unsigned *mount_fails;
 

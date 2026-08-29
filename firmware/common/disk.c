@@ -41,6 +41,14 @@
 
 #define disk_reader_lock()      file_internal_lock_READER()
 #define disk_reader_unlock()    file_internal_unlock_READER()
+
+#ifdef IPOD_NANO7G
+/* Temporary mount-path trace; see n31_trace() in nand-nano7g.c. */
+extern void n31_trace(const char *tag);
+#define DTRACE(t)   n31_trace(t)
+#else
+#define DTRACE(t)   do { } while (0)
+#endif
 #define disk_writer_lock()      file_internal_lock_WRITER()
 #define disk_writer_unlock()    file_internal_unlock_WRITER()
 
@@ -395,6 +403,7 @@ int disk_mount(int drive)
 
     disk_writer_lock();
 
+    DTRACE("m:free_vol");
     int volume = get_free_volume();
 
     if (volume < 0)
@@ -404,6 +413,7 @@ int disk_mount(int drive)
         return 0;
     }
 
+    DTRACE("m:disk_init");
     if (!disk_init(IF_MD(drive)))
     {
         disk_writer_unlock();
@@ -418,6 +428,7 @@ int disk_mount(int drive)
     /* try "superfloppy" mode */
     DEBUGF("Trying to mount sector 0.\n");
 
+    DTRACE("m:fat_mount0");
     if (!fat_mount(IF_MV(volume,) IF_MD(drive,) 0))
     {
 #ifdef MAX_VIRT_SECTOR_SIZE
@@ -449,6 +460,7 @@ int disk_mount(int drive)
             DEBUGF("Trying to mount partition %d.\n", i);
 
 #ifdef MAX_VIRT_SECTOR_SIZE
+            DTRACE("m:part");
             for (int j = 1; j <= (MAX_VIRT_SECTOR_SIZE/LOG_SECTOR_SIZE(drive)); j <<= 1)
             {
                 if (!fat_mount(IF_MV(volume,) IF_MD(drive,) pinfo[i].start * j))
@@ -496,10 +508,13 @@ int disk_mount_all(void)
 {
     int mounted = 0;
 
+    DTRACE("all:lock");
     disk_writer_lock();
 
     /* reset all mounted partitions */
+    DTRACE("all:unmount");
     volume_onunmount_internal(IF_MV(-1));
+    DTRACE("all:fat_init");
     fat_init();
 
     /* mark all volumes as free */
@@ -508,8 +523,11 @@ int disk_mount_all(void)
 
     for (int i = 0; i < NUM_DRIVES; i++)
     {
-        if (storage_present(i))
+        DTRACE("all:present");
+        if (storage_present(i)) {
+            DTRACE("all:mount");
             mounted += disk_mount(i);
+        }
     }
 
     disk_writer_unlock();
