@@ -35,6 +35,13 @@ bool touch_init(void);
 bool touch_available(void);
 
 /*
+ * Nonzero when the controller replied with a bootloader status word instead
+ * of a valid runtime frame -- alive on the bus, application not running.
+ */
+uint16_t touch_bootloader_status(void);
+unsigned touch_ping_failures(void);
+
+/*
  * Poll the controller. Returns BUTTON_TOUCHSCREEN with *x / *y filled when a
  * finger is down, or 0 otherwise.
  */

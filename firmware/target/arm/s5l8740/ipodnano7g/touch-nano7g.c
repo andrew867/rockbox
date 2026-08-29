@@ -56,8 +56,26 @@
 
 #define NIMBUS_SLOTS        8
 
+/* Runtime ping, sub_182590. Type 490 as a little-endian u32 at offset 0. */
+#define NIMBUS_PING_TYPE    490u
+
+/*
+ * Bootloader ACK/status words. These are what the HBPP attention read
+ * (1A A1) returns while the part is still in its bootloader, and seeing one
+ * means the runtime application never started -- it is NOT an idle-with-no-
+ * fingers reading. Distinguishing the two was the thing that made this
+ * driver look mysteriously broken.
+ */
+#define NIMBUS_BL_STATUS_4F81   0x4f81u
+#define NIMBUS_BL_STATUS_4879   0x4879u
+#define NIMBUS_BL_STATUS_4BC1   0x4bc1u
+#define NIMBUS_BL_STATUS_4AD1   0x4ad1u
+#define NIMBUS_BL_STATUS_4969   0x4969u
+
 static bool nimbus_up;
 static int  hbpp_result = TOUCH_HBPP_OK;
+static uint16_t last_bl_status;   /* nonzero: still in the bootloader */
+static unsigned ping_fails;
 static int  last_x, last_y;
 static bool last_down;
 
@@ -138,19 +156,72 @@ static int nimbus_xfer_hold(int len)
     return spi_transfer_cs(SPI_PORT_TOUCH, txbuf, rxbuf, len, false);
 }
 
-/* The 16-byte probe frame: magic, 01 01, checksum at the tail. */
-static bool nimbus_probe_frame(void)
+static bool status_is_bootloader(uint16_t w)
 {
-    memset(txbuf, 0, NIMBUS_FRAME_LEN);
-    txbuf[0] = NIMBUS_MAGIC;
-    txbuf[1] = 0x01;
-    txbuf[2] = 0x01;
-    put_le16(txbuf + 14, nimbus_sum16(txbuf, 14));
+    return w == NIMBUS_BL_STATUS_4F81 || w == NIMBUS_BL_STATUS_4879 ||
+           w == NIMBUS_BL_STATUS_4BC1 || w == NIMBUS_BL_STATUS_4AD1 ||
+           w == NIMBUS_BL_STATUS_4969;
+}
 
-    if (nimbus_xfer(NIMBUS_FRAME_LEN) < 0)
-        return false;
+/*
+ * Runtime ping (sub_182590): a 16-byte exchange carrying type 490.
+ *
+ * The reply's OWN checksum is the readiness test -- sum16 of bytes 0..13 must
+ * equal the little-endian u16 at +14. That matters more than it sounds:
+ * checking only that the first byte came back as 0xEA is satisfied by a
+ * bootloader still answering on the bus, which is exactly how a part that
+ * never started its application can look like a running one.
+ *
+ * On success the reply carries the length of the report waiting to be read,
+ * at +1. That length is the whole reason to ping before reading.
+ */
+static bool nimbus_ping(uint16_t *status_out)
+{
+    int tries;
 
-    return rxbuf[0] == NIMBUS_MAGIC;
+    for (tries = 0; tries < 6; tries++) {
+        uint16_t rx_csum, calc;
+
+        memset(txbuf, 0, NIMBUS_FRAME_LEN);
+        txbuf[0] = (uint8_t)(NIMBUS_PING_TYPE & 0xff);
+        txbuf[1] = (uint8_t)((NIMBUS_PING_TYPE >> 8) & 0xff);
+        txbuf[2] = 0;
+        txbuf[3] = 0;
+        put_le16(txbuf + 14, nimbus_sum16(txbuf, 14));
+
+        if (nimbus_xfer(NIMBUS_FRAME_LEN) < 0)
+            return false;
+
+        rx_csum = get_le16(rxbuf + 14);
+        calc = nimbus_sum16(rxbuf, 14);
+
+        /* All zero means MISO is dead, not that the reply checksummed. */
+        if (!rx_csum && !calc)
+            break;
+
+        if (calc == rx_csum) {
+            last_bl_status = 0;
+            if (status_out)
+                *status_out = get_le16(rxbuf + 1);
+            return true;
+        }
+
+        /*
+         * A bootloader status word here is a specific, recognisable failure:
+         * the part is alive and talking, its application just is not running.
+         */
+        {
+            uint16_t w = get_le16(rxbuf);
+
+            if (status_is_bootloader(w))
+                last_bl_status = w;
+        }
+
+        sleep(1);
+    }
+
+    ping_fails++;
+    return false;
 }
 
 /*
@@ -197,9 +268,24 @@ static void nimbus_parse_reports(const uint8_t *payload, int len)
     last_down = false;
 }
 
-static void nimbus_read_reports(void)
+/*
+ * Read the pending report (sub_17E404).
+ *
+ * The length comes from the ping, as ping_status + 5, capped at 512. This
+ * driver previously read a fixed 16 bytes and never pinged at all, which
+ * could not work even against perfect hardware: a type 'D' report needs at
+ * least 18 payload bytes and a 16-byte frame leaves 11, so the parser bailed
+ * out every single time. Touch was structurally incapable of reporting a
+ * contact, and it looked exactly like a hardware fault.
+ */
+static void nimbus_read_reports(uint16_t ping_status)
 {
-    int len = NIMBUS_FRAME_LEN;
+    int len = (int)ping_status + 5;
+
+    if (len < NIMBUS_FRAME_LEN)
+        len = NIMBUS_FRAME_LEN;
+    if (len > NIMBUS_READ_MAX)
+        len = NIMBUS_READ_MAX;
 
     memset(txbuf, 0, len);
     txbuf[0] = NIMBUS_MAGIC;
@@ -244,7 +330,7 @@ bool touch_init(void)
     spi_port_init(SPI_PORT_TOUCH);
 
     for (tries = 0; tries < 10; tries++) {
-        if (nimbus_probe_frame()) {
+        if (nimbus_ping(NULL)) {
             nimbus_up = true;
             return true;
         }
@@ -274,7 +360,7 @@ bool touch_init(void)
     spi_port_init(SPI_PORT_TOUCH);
 
     for (tries = 0; tries < 10; tries++) {
-        if (nimbus_probe_frame()) {
+        if (nimbus_ping(NULL)) {
             nimbus_up = true;
             return true;
         }
@@ -292,6 +378,22 @@ int touch_hbpp_status(void)
 bool touch_available(void)
 {
     return nimbus_up;
+}
+
+/*
+ * Nonzero when the part answered with a bootloader status word rather than a
+ * valid runtime reply. That is a completely different diagnosis from silence:
+ * the chip is alive and on the bus, its application simply never started, so
+ * the firmware upload or the EXEC is what needs looking at -- not the wiring.
+ */
+uint16_t touch_bootloader_status(void)
+{
+    return last_bl_status;
+}
+
+unsigned touch_ping_failures(void)
+{
+    return ping_fails;
 }
 
 /*
@@ -316,7 +418,19 @@ int touchscreen_read_device(int *x, int *y)
     if (gpio_get(GPIO_PAD_NIMBUS_IRQ))
         return last_down ? BUTTON_TOUCHSCREEN : 0;
 
-    nimbus_read_reports();
+    /*
+     * sub_188FFC: ping first, then read exactly what the ping says is
+     * waiting. The two halves are not separable -- without the ping there is
+     * no length, and without the length the read is the wrong size.
+     */
+    {
+        uint16_t ping_status = 0;
+
+        if (!nimbus_ping(&ping_status))
+            return 0;
+
+        nimbus_read_reports(ping_status);
+    }
 
     if (!last_down)
         return 0;

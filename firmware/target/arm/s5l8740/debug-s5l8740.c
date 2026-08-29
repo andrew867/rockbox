@@ -16,6 +16,7 @@
 #include "gpio-s5l8740.h"
 #include "pmu-target.h"
 #include "mikeybus-nano7g.h"
+#include "touch-nano7g.h"
 #include "tristar-nano7g.h"
 #include "spi-s5l8740.h"
 #include "iis-s5l8740.h"
@@ -114,6 +115,23 @@ bool dbg_mikeybus(void)
 
         line++;
         lcd_putsf(0, line++, "Lightning: %s", tristar_accessory_name());
+        line++;
+
+        /*
+         * Touch state, worded so the two failure modes cannot be confused:
+         * a bootloader status word means the part is alive but its runtime
+         * never started, which is a firmware/EXEC problem, not wiring.
+         */
+        {
+            uint16_t bl = touch_bootloader_status();
+
+            lcd_putsf(0, line++, "Touch up=%d hbpp=%d",
+                      touch_available(), touch_hbpp_status());
+            if (bl)
+                lcd_putsf(0, line++, "  BOOTLOADER %04x (fw not run)", bl);
+            else
+                lcd_putsf(0, line++, "  ping fails=%u", touch_ping_failures());
+        }
         lcd_putsf(0, line++, "SPI0 fam=%d SPI2 fam=%d",
                   spi_get_status_family(SPI_PORT_CODEC),
                   spi_get_status_family(SPI_PORT_TOUCH));

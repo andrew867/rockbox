@@ -11,8 +11,14 @@
 
 /*
  * The playback chain is IIS0 @0x3CA00000 -> PL080 DMAC0 peri 10 -> CS42L81 on
- * SPI0 -> headphone jack, with the D1830 sibling LDOs (regs 21-23 bit 4)
- * powering the analog side.
+ * SPI0 -> headphone jack.
+ *
+ * This comment used to add "with the D1830 sibling LDOs (regs 21-23 bit 4)
+ * powering the analog side". That is wrong and acting on it locked the
+ * Linux kernel on boot: the OSOS rail setter writes registers 20-23 as a
+ * bare (code & 0x1F) at a 25 mV step, so bit 4 is the top bit of a voltage
+ * field, not an enable. Setting it moved three rails by 400 mV each. What
+ * gates the CS42L81 analog supply is still unknown.
  *
  * The digital transport is proven in Linux; the analog side is not -- a 1 kHz
  * tone measures about -66 dBFS at the jack against RetailOS's -16 dBFS, with
