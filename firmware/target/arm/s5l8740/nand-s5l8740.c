@@ -24,6 +24,7 @@
 #include "nand-s5l8740.h"
 #include "nand-s5l8740-seq.h"
 #include "clocking-s5l8740.h"
+#include "boot-beacon.h"
 
 /*
  * The FMSS is a sequencer, not a register-poke NAND controller. Reads are
@@ -112,7 +113,16 @@ bool nand_hw_present(void)
 
 bool nand_hw_init(void)
 {
-    /* The FMC gate lives in PWRCON0. */
+    beacon_mark(BEACON_CYAN);
+
+    /*
+     * Redundant in practice: clocking_init() writes 0 to every PWRCON bank at
+     * system_init() time, exactly as the Linux driver's ungate-all does, so
+     * this bit is already clear when we arrive. Kept because it documents
+     * which gate owns the FMC and costs one store -- but it does mean a stall
+     * on the FMCTRL writes below would NOT be an unclocked-block stall. That
+     * removes the obvious suspect rather than confirming it.
+     */
     clockgate_enable(CLKCON_PWRCON0, (1 << 4), true);
 
     nand_hw_reset();

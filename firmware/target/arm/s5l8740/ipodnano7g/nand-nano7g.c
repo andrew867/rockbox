@@ -66,11 +66,11 @@ int nand_init(void)
      *
      * Bracketed with beacons so a stall names its own phase.
      */
-    beacon_mark(BEACON_MAGENTA);
+    beacon_mark(BEACON_WHITE);
 
     if (ftl_recover() == 0) {
         storage_ready = true;
-        beacon_mark(BEACON_CYAN);
+        beacon_mark(BEACON_BLUE);
     } else {
         /*
          * Not fatal here. Reporting a clean "no storage" lets the firmware

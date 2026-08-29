@@ -22,8 +22,10 @@
 #ifdef IPOD_NANO7G
 #include "boot-beacon.h"
 #define N7G_BEACON(c) beacon_stage(c)
+#define N7G_MARK(c)   beacon_mark(c)
 #else
 #define N7G_BEACON(c) do { } while (0)
+#define N7G_MARK(c)   do { } while (0)
 #endif
 
 #include "version.h"
@@ -562,6 +564,20 @@ static void init(void)
     CHART(">show_logo");
     show_logo_boot();
     CHART("<show_logo");
+
+    /*
+     * Everything from here to storage_init() was a single uninstrumented gap,
+     * and the boot stopped somewhere inside it with the logo still up. The
+     * gap is not small: font_init(), settings_reset(), radio_init() and four
+     * skin/viewport initialisers all run before storage is touched, and
+     * radio_init() drives real tuner hardware over I2C.
+     *
+     * Blaming storage for a hang in that window was a guess, and it was
+     * wrong -- the FTL beacon never painted, which means the boot never
+     * reached the code being blamed. These marks make the next flash say
+     * which call it is, instead of narrowing by one per attempt.
+     */
+    N7G_MARK(BEACON_ORANGE);
     lang_init(core_language_builtin, language_strings,
               LANG_LAST_INDEX_IN_ARRAY);
 
@@ -600,6 +616,7 @@ static void init(void)
 #if CONFIG_TUNER
     radio_init();
 #endif
+    N7G_MARK(BEACON_YELLOW);
 
 #ifdef HAVE_HARDWARE_CLICK
     piezo_init();
@@ -619,6 +636,8 @@ static void init(void)
     CHART(">viewportmanager_init");
     viewportmanager_init();
     CHART("<viewportmanager_init");
+
+    N7G_MARK(BEACON_MAGENTA);
 
     CHART(">storage_init");
     rc = storage_init();
