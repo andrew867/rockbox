@@ -89,7 +89,7 @@ _newstart:
      * and died instantly, and there was no way to tell those apart. Anything
      * other than U-Boot's logo from here on means we are executing.
      */
-    BEACON 0xffff
+    BEACON 0x00ffffff
 
     /*
      * U-Boot hands over with the MMU and caches on and its own page tables
@@ -158,7 +158,7 @@ _newstart:
      * stops, the MMU is where it died; build with N31_NO_MMU to take that
      * out of the picture entirely.
      */
-    BEACON 0xf800
+    BEACON 0x00ff0000
 
     /* Set up stack for IRQ mode */
     msr     cpsr_c, #0xd2
@@ -187,6 +187,16 @@ _newstart:
     cmp     sp, r2
     strhi   r3, [r2], #4
     bhi     1b
+
+    /*
+     * ORANGE: stacks are built and we are one instruction from C.
+     *
+     * This splits what was previously a single opaque gap. Stopping on RED
+     * now means the failure is inside crt0 itself -- the mode switches or the
+     * stack munge, both of which touch DRAM through the freshly enabled MMU.
+     * Reaching ORANGE and no further moves the search into the C runtime.
+     */
+    BEACON 0x00ff8000
 
     b       main
     .ltorg

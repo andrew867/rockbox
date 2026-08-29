@@ -499,7 +499,7 @@ static void init(void)
      * means Timer B never delivered its interrupt, and every sleep() in the
      * firmware is an infinite wait.
      */
-    N7G_BEACON(BEACON_CYAN);
+    N7G_BEACON(BEACON_BLUE);
 
 #if defined(HAVE_BOOTDATA) && !defined(BOOTLOADER)
     verify_boot_data();
@@ -539,7 +539,7 @@ static void init(void)
 #endif
     /* current_tick should be ticking by now */
     CHART("ticking");
-    N7G_BEACON(BEACON_WHITE);
+    N7G_BEACON(BEACON_PURPLE);
 
     unicode_init();
     lcd_init();

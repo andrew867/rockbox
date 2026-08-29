@@ -12,38 +12,62 @@
 #include <stdint.h>
 
 /*
- * Stage colours. The last colour on the panel is how far the boot got, which
- * on a device with no serial console is the only thing a hang can tell us.
+ * Stage colours, as XRGB8888.
  *
- *   U-Boot logo  never reached C -- crt0, MMU or the branch to main()
- *   RED          system_init() entered: crt0, MMU and DRAM are all good
- *   YELLOW       clocks and the microsecond timer are programmed
- *   GREEN        system_init() finished: GPIO, EIC, DMA and SPI all returned
- *   CYAN         kernel_init() returned -- the tick is actually firing
- *   BLUE         lcd_init() done, the real driver owns the panel
- *   MAGENTA      storage step passed (or was skipped)
+ * The panel takes one 32-bit XRGB8888 word per pixel -- NOT the RGB565 this
+ * port uses internally. That was found the hard way: the first beacons wrote
+ * RGB565 constants and came out as entirely the wrong colours, because the
+ * hardware read 0x0000ffff (RGB565 white) as R=00 G=ff B=ff and painted cyan.
+ * Every colour here is therefore written out in full rather than reusing the
+ * LCD_RGBPACK values.
  *
- * GREEN with no CYAN is the specific, expected failure worth calling out: it
- * means the tick timer never fired, and every sleep() in the firmware is an
- * infinite wait. Timer E's register offsets are assumed from the s5l8720
- * layout rather than confirmed on this SoC, so that is a live possibility.
+ * Every stage has its OWN colour. An earlier ladder reused RED for both the
+ * end of crt0 and the start of system_init, which made those two states
+ * indistinguishable at exactly the point the boot was stopping -- a beacon
+ * that cannot tell two stages apart is not a beacon.
+ *
+ *   U-Boot logo  the bootloader never branched to us at all
+ *   WHITE        crt0 entered, supervisor mode set          (asm, no C runtime)
+ *   RED          memory_init() returned, MMU up             (asm)
+ *   ORANGE       stacks built, about to branch to main()    (asm)
+ *   YELLOW       system_init() entered -- first C code to paint
+ *   GREEN        clocks and the microsecond timer programmed
+ *   CYAN         system_init() finished: GPIO, EIC, DMA, SPI all returned
+ *   BLUE         kernel_init() returned -- the tick is actually firing
+ *   MAGENTA      i2c_init() and power_init() returned
+ *   PURPLE       current_tick is ticking; lcd_init() is next
+ *
+ * Two gaps are worth naming in advance, because they are the ones most likely
+ * to happen and are otherwise completely silent:
+ *
+ *   ORANGE, no YELLOW  C was entered but the first C beacon never painted.
+ *                      The assembly beacons prove the LCDIF is running, so
+ *                      this points at the C runtime -- bss, stack, literal
+ *                      pools -- rather than at the display.
+ *   CYAN, no BLUE      The tick timer never fired, so every sleep() in the
+ *                      firmware is an infinite wait. Timer E's offsets are
+ *                      assumed from the s5l8720 layout rather than confirmed
+ *                      on this SoC, so this is a live possibility rather than
+ *                      a theoretical one.
  */
-#define BEACON_RED      0xf800
-#define BEACON_YELLOW   0xffe0
-#define BEACON_GREEN    0x07e0
-#define BEACON_CYAN     0x07ff
-#define BEACON_BLUE     0x001f
-#define BEACON_MAGENTA  0xf81f
-#define BEACON_WHITE    0xffff
-#define BEACON_BLACK    0x0000
+#define BEACON_RED      0x00ff0000
+#define BEACON_ORANGE   0x00ff8000
+#define BEACON_YELLOW   0x00ffff00
+#define BEACON_GREEN    0x0000ff00
+#define BEACON_CYAN     0x0000ffff
+#define BEACON_BLUE     0x000000ff
+#define BEACON_MAGENTA  0x00ff00ff
+#define BEACON_PURPLE   0x008000ff
+#define BEACON_WHITE    0x00ffffff
+#define BEACON_BLACK    0x00000000
 
-/* Fill the panel. Brings the LCDIF up on first use. */
-void beacon_fill(uint16_t colour);
+/* Fill the panel. */
+void beacon_fill(uint32_t colour);
 
 /* Fill and hold long enough to be seen. */
-void beacon_stage(uint16_t colour);
+void beacon_stage(uint32_t colour);
 
 /* Top half / bottom half, for showing two facts at once. */
-void beacon_split(uint16_t top, uint16_t bottom);
+void beacon_split(uint32_t top, uint32_t bottom);
 
 #endif /* __BOOT_BEACON_H__ */

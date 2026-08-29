@@ -189,6 +189,38 @@ void lcd_init_device(void)
     beacon_stage(BEACON_BLUE);
 }
 
+/*
+ * The panel wants XRGB8888; Rockbox draws in RGB565.
+ *
+ * LCD_WDATA takes one 32-bit XRGB8888 word per pixel. It does NOT take the
+ * RGB565 this port uses as its framebuffer format, and it does not convert:
+ * storing a raw fb_data here makes the hardware read the two 565 halves as
+ * green and blue and paint something unrelated to what was drawn. The early
+ * boot beacons hit exactly that -- an RGB565 white came out cyan -- which is
+ * what surfaced this.
+ *
+ * Note the LCDIF format field is never programmed, here or in the Linux
+ * driver: both preserve whatever the bootloader left in CON. So the format is
+ * an inherited fact about the handoff rather than a choice either driver gets
+ * to make, and matching it is not optional.
+ *
+ * The low bits are replicated rather than zero-filled so that full-scale
+ * inputs reach full-scale outputs -- 0x1f must become 0xff, not 0xf8, or
+ * whites come out dingy and the whole range is compressed.
+ */
+static inline uint32_t n31_rgb565_to_xrgb8888(unsigned p)
+{
+    unsigned r = (p >> 11) & 0x1f;
+    unsigned g = (p >> 5)  & 0x3f;
+    unsigned b =  p        & 0x1f;
+
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+
+    return (r << 16) | (g << 8) | b;
+}
+
 void lcd_update_rect(int x, int y, int width, int height)
 {
     const fb_data *fb = FBADDR(0, 0);
@@ -221,7 +253,7 @@ void lcd_update_rect(int x, int y, int width, int height)
                     return;     /* interface wedged; give up on this frame */
             }
 
-            N31_LCD_WDATA = row[px];
+            N31_LCD_WDATA = n31_rgb565_to_xrgb8888(row[px]);
         }
     }
 }

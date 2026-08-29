@@ -48,32 +48,14 @@
  * line number.
  */
 
-#define N31_LCD_CON         (*(REG32_PTR_T)(LCDIF_BASE + 0x00))
 #define N31_LCD_STATUS      (*(REG32_PTR_T)(LCDIF_BASE + 0x1c))
-#define N31_LCD_PHTIME      (*(REG32_PTR_T)(LCDIF_BASE + 0x20))
-#define N31_LCD_UNK2C       (*(REG32_PTR_T)(LCDIF_BASE + 0x2c))
-#define N31_LCD_RESET       (*(REG32_PTR_T)(LCDIF_BASE + 0x30))
 #define N31_LCD_WDATA       (*(REG32_PTR_T)(LCDIF_BASE + 0x40))
-#define N31_LCD_UNK68       (*(REG32_PTR_T)(LCDIF_BASE + 0x68))
-#define N31_LCD_UNK70       (*(REG32_PTR_T)(LCDIF_BASE + 0x70))
-#define N31_LCD_SIZE        (*(REG32_PTR_T)(LCDIF_BASE + 0x74))
-#define N31_LCD_UNK78       (*(REG32_PTR_T)(LCDIF_BASE + 0x78))
-#define N31_LCD_UNK7C       (*(REG32_PTR_T)(LCDIF_BASE + 0x7c))
-#define N31_LCD_UNK84       (*(REG32_PTR_T)(LCDIF_BASE + 0x84))
-#define N31_LCD_UNKA4       (*(REG32_PTR_T)(LCDIF_BASE + 0xa4))
 
 #define LCD_STATUS_BUSY     0x10
-#define CON_HOLD            (1 << 10)
-#define CON_RUN             (1 << 11)
-#define CON_BASE            0x00100ab0
-#define CON_MODE_MASK       0xc0000000
-#define CON_FMT_MASK        0x00000007
 
 /* Bare spin counts. Generous, but finite by construction. */
 #define SPIN_SHORT          200000u
 #define SPIN_PIXEL          20000u
-
-static bool beacon_ready;
 
 static void beacon_spin(unsigned n)
 {
@@ -82,41 +64,28 @@ static void beacon_spin(unsigned n)
 }
 
 /*
- * Minimal LCDIF bring-up.
+ * No LCDIF bring-up here. That is the design, not an omission.
  *
- * Deliberately does NOT do the full reset dance from lcd-nano7g.c: that path
- * waits on status bits with real timeouts and pokes CLKCON, and any of it
- * could be the thing that is wrong. U-Boot has already left the interface
- * running and the panel lit, so the least-risk action is to reprogram
- * geometry and start pushing pixels.
+ * This module used to reprogram the interface first -- CON, SIZE, PHTIME and
+ * a handful of undocumented registers -- on the assumption that something had
+ * to be set up before pixels would land. The assembly beacons in crt0 then
+ * proved otherwise: they paint the panel with nothing but two MMIO stores,
+ * before the C runtime exists at all. U-Boot hands over with the interface
+ * already running and the panel lit.
+ *
+ * Which turns that setup from harmless into actively harmful. Every register
+ * it wrote was a chance to stop a working display, and if it did, the failure
+ * mode is the cruellest one available: the screen freezes on the last colour
+ * the assembly beacons painted, so the diagnostic becomes indistinguishable
+ * from the bug it was added to find. A debugging aid must not be able to break
+ * the thing it is reporting on.
+ *
+ * So: poll, store, nothing else -- the same two registers the assembly path
+ * uses, for the same reason. They are the only two that are proven.
  */
-static void beacon_init(void)
-{
-    uint32_t con = N31_LCD_CON;
-    uint32_t keep = con & (CON_MODE_MASK | CON_FMT_MASK);
-
-    N31_LCD_UNK78 = 0x000a000a;
-    N31_LCD_CON = keep | CON_BASE;
-    N31_LCD_UNK2C = 1;
-    N31_LCD_UNK68 = 0;
-    N31_LCD_UNK70 = 0;
-    N31_LCD_SIZE = LCD_HEIGHT | (LCD_WIDTH << 16);
-    N31_LCD_PHTIME = 0;
-    N31_LCD_UNK7C = 770;
-    N31_LCD_UNK84 = 100;
-    N31_LCD_UNKA4 = 1;
-
-    N31_LCD_CON = (N31_LCD_CON & ~CON_HOLD) | CON_RUN;
-
-    beacon_ready = true;
-}
-
-void beacon_fill(uint16_t colour)
+void beacon_fill(uint32_t colour)
 {
     unsigned n = LCD_WIDTH * LCD_HEIGHT;
-
-    if (!beacon_ready)
-        beacon_init();
 
     while (n--) {
         unsigned spin = SPIN_PIXEL;
@@ -137,7 +106,7 @@ void beacon_fill(uint16_t colour)
  * Paint a stage colour and leave it up long enough to be seen even if the
  * next stage is instant.
  */
-void beacon_stage(uint16_t colour)
+void beacon_stage(uint32_t colour)
 {
     beacon_fill(colour);
     beacon_spin(SPIN_SHORT);
@@ -148,14 +117,11 @@ void beacon_stage(uint16_t colour)
  * is the stage reached, the bottom band a pass/fail flag for something the
  * caller cares about.
  */
-void beacon_split(uint16_t top, uint16_t bottom)
+void beacon_split(uint32_t top, uint32_t bottom)
 {
     unsigned n = LCD_WIDTH * LCD_HEIGHT;
     unsigned half = n / 2;
     unsigned i;
-
-    if (!beacon_ready)
-        beacon_init();
 
     for (i = 0; i < n; i++) {
         unsigned spin = SPIN_PIXEL;

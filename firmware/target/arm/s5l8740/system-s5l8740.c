@@ -179,7 +179,7 @@ void system_init(void)
      * say so, and it has to happen before system_init() and kernel_init(),
      * both of which run ahead of Rockbox's own lcd_init().
      */
-    beacon_stage(BEACON_RED);
+    beacon_stage(BEACON_YELLOW);
 
     /* Both VICs were disarmed in crt0; set them up properly now. */
     VIC0INTENCLEAR = ~0;
@@ -198,7 +198,7 @@ void system_init(void)
     usec_timer_init();
 
     /* Clocks and the microsecond timer are programmed. */
-    beacon_stage(BEACON_YELLOW);
+    beacon_stage(BEACON_GREEN);
 
     gpio_init();
     eic_init();
@@ -206,7 +206,7 @@ void system_init(void)
     spi_init();
 
     /* Everything system_init() owns returned without hanging. */
-    beacon_stage(BEACON_GREEN);
+    beacon_stage(BEACON_CYAN);
 }
 
 void system_reboot(void)
