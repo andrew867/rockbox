@@ -57,6 +57,7 @@
 #define NIMBUS_SLOTS        8
 
 static bool nimbus_up;
+static int  hbpp_result = TOUCH_HBPP_OK;
 static int  last_x, last_y;
 static bool last_down;
 
@@ -257,15 +258,35 @@ bool touch_init(void)
      */
 
     /*
-     * TODO: firmware upload. The stock path pushes GrapeFirmware.bin (shipped
-     * here as firmware/apple/grape-nimbus.bin) in 0x1FF0-byte chunks before
-     * the controller reports properly, and follows it with a calibration
-     * blob. That needs a filesystem, which arrives with the FTL in Phase 5.
+     * The probe failed, which normally means the controller has no firmware
+     * yet -- it has none of its own in flash and expects the host to upload
+     * one every cold boot.
      *
-     * On a device where U-Boot or RetailOS has already loaded the controller
-     * firmware, the probe above succeeds without it.
+     * This is only reachable now that storage exists; before the FTL there
+     * was nowhere to read the image from, and touch worked only if some
+     * earlier stage happened to have loaded the part already.
      */
+    hbpp_result = touch_hbpp_load();
+    if (hbpp_result != TOUCH_HBPP_OK)
+        return false;
+
+    /* The controller reboots into its application, so re-probe. */
+    spi_port_init(SPI_PORT_TOUCH);
+
+    for (tries = 0; tries < 10; tries++) {
+        if (nimbus_probe_frame()) {
+            nimbus_up = true;
+            return true;
+        }
+        sleep(HZ / 50);
+    }
+
     return false;
+}
+
+int touch_hbpp_status(void)
+{
+    return hbpp_result;
 }
 
 bool touch_available(void)

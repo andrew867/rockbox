@@ -11,6 +11,26 @@
 
 #include <stdbool.h>
 
+/*
+ * HBPP firmware upload results. "No file" is reported separately from a
+ * protocol failure because the two mean very different things: one is a
+ * packaging problem, the other is a bus or frame-format problem.
+ */
+#define TOUCH_HBPP_OK           0
+#define TOUCH_HBPP_ERR_NOFILE   1
+#define TOUCH_HBPP_ERR_UPLOAD   2
+#define TOUCH_HBPP_ERR_EXEC     3
+#define TOUCH_HBPP_ERR_BUS      4
+
+/*
+ * Upload the controller firmware and calibration from disk, then start it.
+ * Requires a mounted filesystem, so it can only run after storage is up.
+ */
+int touch_hbpp_load(void);
+
+/* Last HBPP result, for the debug screen. */
+int touch_hbpp_status(void);
+
 bool touch_init(void);
 bool touch_available(void);
 

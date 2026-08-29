@@ -423,6 +423,14 @@ sub buildzip {
         glob_mkdir("$temp_dir/libertas");
         glob_copy("$ROOT/firmware/drivers/libertas/firmware/*", "$temp_dir/libertas/");
     }
+    # copy the touchscreen and Bluetooth controller firmware
+    #
+    # Neither part keeps firmware of its own, so the host uploads one every
+    # cold boot -- the touch controller will not report at all without it.
+    if ($modelname =~ /ipodnano7g/) {
+        glob_copy("$ROOT/firmware/target/arm/s5l8740/ipodnano7g/firmware/*",
+                  "$temp_dir/");
+    }
     # add hbmenu shortcut's icon and 3dsx executable
     if ($modelname =~ /ctru/) {
         glob_copy("icon.icn", "$temp_dir/");
