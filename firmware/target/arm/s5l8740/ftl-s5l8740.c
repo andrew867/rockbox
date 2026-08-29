@@ -454,11 +454,77 @@ static unsigned ingest_page_meta(const struct nand_cs_page *p,
 }
 
 /* Walk an open superblock until the first blank page. */
+/*
+ * Defined with the CXT loader further down; the open-superblock fast-forward
+ * below needs them and sits above it. Tentative definitions, so both refer to
+ * the same object.
+ */
+static bool cxt_loaded;
+static uint64_t cxt_weave;
+
+/* Newest weave among a page's valid slots; 0 if none. */
+static uint64_t page_weave_max(const struct nand_cs_page *p)
+{
+    uint64_t best = 0;
+    unsigned s;
+
+    for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
+        if (p->meta[s].valid && p->meta[s].weave > best)
+            best = p->meta[s].weave;
+    }
+    return best;
+}
+
+/*
+ * Find the first page in this superblock that the checkpoint does NOT cover.
+ *
+ * Open superblocks cannot be skipped wholesale -- that was the bug that threw
+ * away the entire post-checkpoint history -- but that does not mean every page
+ * in them has to be re-ingested. A block open across the checkpoint is mostly
+ * pages the CXT already recorded; only the tail is new.
+ *
+ * Whimory appends, so weave increases monotonically down the block. That makes
+ * "first page newer than the checkpoint" a boundary a binary search can find
+ * in about seven reads instead of walking up to 128. Everything before it is
+ * already in the map and re-reading it produces entries map_add() would
+ * discard as stale.
+ *
+ * Blank means past the live end, so the search moves left: there is nothing
+ * newer beyond it.
+ *
+ * This is what "fast-forward into the snapshot's future" actually means -- not
+ * skipping blocks, which loses data, but skipping the prefix of each block
+ * that the snapshot already accounts for.
+ */
+static unsigned open_sb_start(unsigned ce, unsigned cau, unsigned block)
+{
+    unsigned lo = 0, hi = DATA_PAGES_PER_SB;
+
+    if (!cxt_loaded)
+        return 0;
+
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+
+        if (nand_cs_phys_read(ce, cau, block, mid, &scratch)) {
+            hi = mid;               /* unreadable: assume nothing newer past it */
+            continue;
+        }
+
+        if (page_blank(&scratch) || page_weave_max(&scratch) > cxt_weave)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+
+    return lo;
+}
+
 static void rebuild_open_sb(unsigned ce, unsigned cau, unsigned block)
 {
     unsigned pg;
 
-    for (pg = 0; pg < DATA_PAGES_PER_SB; pg++) {
+    for (pg = open_sb_start(ce, cau, block); pg < DATA_PAGES_PER_SB; pg++) {
         if (nand_cs_phys_read(ce, cau, block, pg, &scratch))
             break;
 
