@@ -17,6 +17,7 @@
  * KIND, either express or implied.
  *
  ****************************************************************************/
+#include <stdio.h>
 #include "config.h"
 #include "system.h"
 #ifdef IPOD_NANO7G
@@ -185,6 +186,20 @@ static void n7g_stage(const char *what);
  * Deliberately temporary: this adds seconds to every boot and comes out as
  * soon as the home screen is reached.
  */
+/* Same, with a number -- for reporting a return code. */
+static void n7g_stage_num(const char *what, int v)
+{
+    char buf[32];
+
+    lcd_clear_display();
+    lcd_putsxy(4, 4,  "N7G stage");
+    lcd_putsxy(4, 20, what);
+    snprintf(buf, sizeof(buf), "= %d", v);
+    lcd_putsxy(4, 36, buf);
+    lcd_update();
+    sleep(3 * HZ);
+}
+
 static void n7g_stage(const char *what)
 {
     lcd_clear_display();
@@ -745,6 +760,13 @@ static void init(void)
         CHART(">disk_mount_all");
         rc = disk_mount_all();
         CHART("<disk_mount_all");
+        /*
+         * The question the markers could not answer: does it return?
+         * "disk_mount_all on screen and nothing after" is consistent with a
+         * hang inside it AND with it returning into something that hangs
+         * later. Those need entirely different work.
+         */
+        n7g_stage_num("mount rc", rc);
         if (rc<=0)
         {
             int line=0;

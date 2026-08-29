@@ -60,6 +60,14 @@ void n31_trace(const char *tag)
     lcd_putsxy(4, 4,  "N7G disk");
     lcd_putsxy(4, 20, tag);
     lcd_update();
+
+    /*
+     * Hold. Without this the nine markers flash past in under 200ms, which
+     * looks identical to none of them painting at all -- and "nothing
+     * appeared" was read as "the function is never entered" when it may
+     * simply have been too fast to see.
+     */
+    sleep(HZ / 4);
 }
 
 /* Points at the trace counter while the mount is running; NULL after. */
