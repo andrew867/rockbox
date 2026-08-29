@@ -84,27 +84,82 @@ static const struct n31_rate n31_rates[] = {
     { 48000, 12,  250 },
 };
 
+/*
+ * One resolver, used by both the IIS divider and the codec rate code.
+ *
+ * They must never resolve independently. In the Linux tree the codec fell
+ * back to 44.1 kHz for anything it did not recognise while the IIS side
+ * refused the stream outright -- so an out-of-table rate left the codec
+ * programmed for one rate and the clock divider set for another. Two halves
+ * of one link configured differently is silence or noise, not an error.
+ *
+ * An exact match wins; otherwise the nearest supported rate by *relative*
+ * distance, which keeps substitutions predictable (96000 -> 48000,
+ * 5512 -> 8000) rather than collapsing everything onto the default.
+ */
+unsigned int n31_resolve_rate(unsigned int rate)
+{
+    unsigned i;
+    unsigned best = 44100;
+    unsigned long best_err = ~0UL;
+
+    if (!rate)
+        return 44100;
+
+    for (i = 0; i < ARRAYLEN(n31_rates); i++) {
+        unsigned r = n31_rates[i].rate;
+        unsigned long err;
+
+        if (r == rate)
+            return rate;
+
+        err = (r > rate) ? (r - rate) : (rate - r);
+        err = (err * 100000UL) / r;     /* proportional, not absolute */
+
+        if (err < best_err) {
+            best_err = err;
+            best = r;
+        }
+    }
+
+    return best;
+}
+
 static uint16_t n31_clkdiv_for(unsigned int rate)
 {
     unsigned i;
+
+    rate = n31_resolve_rate(rate);
 
     for (i = 0; i < ARRAYLEN(n31_rates); i++) {
         if (n31_rates[i].rate == rate)
             return n31_rates[i].clkdiv;
     }
-    /* Fall back to the same relationship the table encodes. */
-    return rate ? (MCLK_ASSUME_HZ / rate) : 272;
+    return 272;     /* unreachable: the resolver only returns table rates */
 }
 
 uint8_t iis_codec_rate_code(unsigned int rate)
 {
     unsigned i;
 
+    /* Same resolver as the divider, so the two always agree. */
+    rate = n31_resolve_rate(rate);
+
     for (i = 0; i < ARRAYLEN(n31_rates); i++) {
         if (n31_rates[i].rate == rate)
             return n31_rates[i].codec_code;
     }
     return 10;  /* 44.1 kHz */
+}
+
+/*
+ * True when the codec must run its sample-rate converter rather than clocking
+ * the DAC straight off the ASP. OSOS takes the SRC arm for every rate except
+ * 48 kHz (rate code 12) -- sub_183138.
+ */
+bool iis_rate_uses_src(unsigned int rate)
+{
+    return iis_codec_rate_code(rate) != 12;
 }
 
 /*

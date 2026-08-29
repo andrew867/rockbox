@@ -73,8 +73,18 @@
 /* The divider is derived against this, per the RetailOS rate table. */
 #define MCLK_ASSUME_HZ      12000000
 
+/*
+ * Resolve a requested rate to one the divider table can actually clock.
+ * Both the IIS divider and the codec rate code go through this, so the two
+ * halves of the link can never end up configured for different rates.
+ */
+unsigned int n31_resolve_rate(unsigned int rate);
+
 /* CS42L81 rate code for a sample rate, shared with the codec driver. */
 uint8_t iis_codec_rate_code(unsigned int rate);
+
+/* True when the codec needs its sample-rate converter (every rate but 48k). */
+bool iis_rate_uses_src(unsigned int rate);
 
 /* IIS0 STATUS -- 0x320 / 0x420 when healthy, for the debug screens. */
 uint32_t iis0_status(void);
