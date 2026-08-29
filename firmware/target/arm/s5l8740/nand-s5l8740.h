@@ -100,6 +100,13 @@ int nand_cs_phys_read(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
 bool nand_cs_probe_empty(uint8_t ce, uint8_t cau, uint16_t block,
                          uint8_t page);
 
+/*
+ * Slot-0 meta only, one record instead of four. Enough to decide blank-ness
+ * and which side of a weave boundary a page falls on; not enough to ingest.
+ */
+bool nand_cs_probe_meta0(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
+                         struct nand_meta *out);
+
 void nand_meta_decode(const uint8_t *m16, struct nand_meta *out);
 
 static inline bool nand_meta_is_data(const struct nand_meta *m)

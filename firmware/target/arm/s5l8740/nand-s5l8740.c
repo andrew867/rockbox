@@ -103,7 +103,29 @@ static uint8_t nand_stbuf[DMA_STATUS_LEN]   __attribute__((aligned(64)));
 static uint32_t nand_cmdl[DMA_CMDLIST_LEN / 4] __attribute__((aligned(64)));
 
 static bool nand_ready;
+/*
+ * Pages between full sequencer resets.
+ *
+ * Every read already ends with FMCTRL0 = 1, so CS is not left permanently
+ * asserted -- which is the failure the Linux side hit when it tried
+ * meta-only reads and the device rebooted. But a recovery walks 8000+ pages
+ * in one unbroken run, and nothing was reasserting the sequencer across it:
+ * pages_since_reset was incremented in five places and never once read.
+ *
+ * So it does now. A full reset is two register writes and two 10us delays,
+ * which at this interval is unmeasurable against the reads it sits between,
+ * and it bounds how far any sequencer state can drift before being cleared.
+ */
+#define PAGES_PER_RESET     4096
+
 static unsigned pages_since_reset;
+
+/* Reassert the sequencer periodically; see PAGES_PER_RESET. */
+static void nand_reset_if_due(void)
+{
+    if (++pages_since_reset >= PAGES_PER_RESET)
+        nand_hw_reset();            /* clears the counter */
+}
 
 /*
  * S5L8740_UNCACHED_ADDR() casts through typeof(), which an array cannot be
@@ -373,6 +395,44 @@ static int fmss_dma_page_read(unsigned ce, uint32_t addr,
  *   deciding that from slot 0 alone would silently misfile it. The saving is
  *   confined to blocks where one record is genuinely the whole answer.
  */
+/*
+ * Slot-0 meta at a quarter of the transfer.
+ *
+ * The open-superblock fast-forward binary-searches for the first page newer
+ * than the checkpoint, and to do that it needs two things from each probe:
+ * whether the page is blank, and its weave. Both live in the meta. It was
+ * reading a full four-record page -- 16448 bytes -- to look at sixteen of
+ * them, seven times per superblock.
+ *
+ * Slot 0 is enough for a monotonic search: the four slots of a page are
+ * written together, so their weaves are adjacent, and the search only needs
+ * to know which side of the checkpoint the page falls on. It is not enough
+ * for ingest, which is why this returns meta and not data -- the caller
+ * re-reads the page in full once the boundary is found.
+ */
+bool nand_cs_probe_meta0(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
+                         struct nand_meta *out)
+{
+    uint32_t addr;
+
+    if (!nand_ready || !out)
+        return false;
+    if (ce >= NAND_MAX_CE || cau >= NAND_MAX_CAU ||
+        block >= NAND_BLOCKS_PER_CAU || page > NAND_BTOC_PAGE)
+        return false;
+
+    addr = nand_ppn_addr(cau, block, page, 0);
+
+    if (fmss_dma_page_read(ce, addr, 0, 1)) {
+        nand_reset_if_due();
+        return false;
+    }
+    nand_reset_if_due();
+
+    nand_meta_decode((const uint8_t *)UNCACHED(nand_spare), out);
+    return true;
+}
+
 bool nand_cs_probe_empty(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page)
 {
     const uint8_t *d, *m;
@@ -388,10 +448,10 @@ bool nand_cs_probe_empty(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page)
     addr = nand_ppn_addr(cau, block, page, 0);
 
     if (fmss_dma_page_read(ce, addr, 0, 1)) {
-        pages_since_reset++;
+        nand_reset_if_due();
         return false;           /* read failed: let the full path decide */
     }
-    pages_since_reset++;
+    nand_reset_if_due();
 
     m = (const uint8_t *)UNCACHED(nand_spare);
     for (i = 0; i < NAND_SLOT_META; i++) {
@@ -430,7 +490,7 @@ int nand_cs_phys_read(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
     addr = nand_ppn_addr(cau, block, page, 0);
 
     ret = fmss_dma_page_read(ce, addr, 0, NAND_SLOTS_PER_PAGE);
-    pages_since_reset++;
+    nand_reset_if_due();
 
     if (ret)
         return ret;

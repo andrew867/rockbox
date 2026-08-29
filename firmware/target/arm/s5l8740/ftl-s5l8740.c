@@ -404,18 +404,6 @@ static unsigned ingest_page_meta(const struct nand_cs_page *p,
 static bool cxt_loaded;
 static uint64_t cxt_weave;
 
-/* Newest weave among a page's valid slots; 0 if none. */
-static uint64_t page_weave_max(const struct nand_cs_page *p)
-{
-    uint64_t best = 0;
-    unsigned s;
-
-    for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
-        if (p->meta[s].valid && p->meta[s].weave > best)
-            best = p->meta[s].weave;
-    }
-    return best;
-}
 
 /*
  * Find the first page in this superblock that the checkpoint does NOT cover.
@@ -447,13 +435,19 @@ static unsigned open_sb_start(unsigned ce, unsigned cau, unsigned block)
 
     while (lo < hi) {
         unsigned mid = lo + (hi - lo) / 2;
+        struct nand_meta m;
 
-        if (nand_cs_phys_read(ce, cau, block, mid, &scratch)) {
+        /*
+         * Quarter-cost probe: the search needs only blank-ness and a weave,
+         * both of which are in slot 0's meta. Reading all four records here
+         * moved 16448 bytes to look at sixteen, seven times per superblock.
+         */
+        if (!nand_cs_probe_meta0(ce, cau, block, mid, &m)) {
             hi = mid;               /* unreadable: assume nothing newer past it */
             continue;
         }
 
-        if (page_blank(&scratch) || page_weave_max(&scratch) > cxt_weave)
+        if (m.blank || m.weave > cxt_weave)
             hi = mid;
         else
             lo = mid + 1;
