@@ -81,13 +81,30 @@
 
 static bool lcd_on = true;
 
+/*
+ * Iteration backstop for every wait in this file.
+ *
+ * lcdif_reset() gates the LCDIF clocks OFF and then waits for the block to
+ * update STATUS and to clear its reset bit. A block with no clock may do
+ * neither, which means the timeout is not the unlikely path here -- it is the
+ * expected one. Every such wait therefore escapes solely via USEC_TIMER, and
+ * if that timer does not count, every one of them is infinite.
+ *
+ * That is what a red bottom band on the boot beacon would be reporting, and
+ * it is too much load-bearing weight to rest on an assumed register offset.
+ */
+#define WAIT_GUARD      50000000u
+
 /* Wait for a status bit to clear; returns false on timeout. */
 static bool wait_status_clear(uint32_t mask, unsigned timeout_us)
 {
     unsigned stop = USEC_TIMER + timeout_us;
+    unsigned guard = WAIT_GUARD;
 
     while (N31_LCD_STATUS & mask) {
         if (TIME_AFTER(USEC_TIMER, stop))
+            return false;
+        if (--guard == 0)
             return false;
     }
     return true;
@@ -118,7 +135,7 @@ static void lcdif_program(void)
 static void lcdif_reset(void)
 {
     uint32_t clk08, clk18;
-    unsigned stop;
+    unsigned stop, guard;
 
     /* An LCDIF reset needs two CLKCON gates cycled around it. */
     clk08 = CLKCON_08;
@@ -126,41 +143,49 @@ static void lcdif_reset(void)
     CLKCON_08 = clk08 & CLKCON_08_MASK;
     CLKCON_18 = clk18 & CLKCON_18_MASK;
 
-    beacon_split(BEACON_RED, BEACON_BLACK);
+    beacon_mark(BEACON_RED);
 
     N31_LCD_CON &= ~CON_HOLD;
 
     wait_status_clear(N31_LCD_STATUS_RESETTING, RESET_TIMEOUT_US);
 
+    beacon_mark(BEACON_ORANGE);
+
     N31_LCD_RESET = 1;
     stop = USEC_TIMER + RESET_TIMEOUT_US;
+    guard = WAIT_GUARD;
     while (N31_LCD_RESET) {
         if (TIME_AFTER(USEC_TIMER, stop))
             break;              /* reset did not ack -- carry on anyway */
+        if (--guard == 0)
+            break;
     }
 
-    beacon_split(BEACON_YELLOW, BEACON_BLACK);
+    beacon_mark(BEACON_YELLOW);
 
     /*
      * Poke the hold bit until the interface admits it is held. The stock code
      * loops on this for up to half a second, so we do too.
      */
     stop = USEC_TIMER + RESET_TIMEOUT_US;
+    guard = WAIT_GUARD / 1000u;         /* udelay(150) dominates this one */
     while (!(N31_LCD_CON & CON_HOLD)) {
         N31_LCD_CON |= CON_HOLD;
         if (TIME_AFTER(USEC_TIMER, stop))
             break;
+        if (--guard == 0)
+            break;
         udelay(150);
     }
 
-    beacon_split(BEACON_GREEN, BEACON_BLACK);
+    beacon_mark(BEACON_GREEN);
 
     N31_LCD_CON &= ~CON_HOLD;
 
     CLKCON_08 = clk08;
     CLKCON_18 = clk18;
 
-    beacon_split(BEACON_CYAN, BEACON_BLACK);
+    beacon_mark(BEACON_CYAN);
 }
 
 static void lcdif_run(void)

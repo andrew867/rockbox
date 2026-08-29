@@ -107,4 +107,16 @@ void beacon_split(uint32_t top, uint32_t bottom);
  */
 void beacon_probe_usec(void);
 
+/*
+ * Paint a stage over the latched USEC_TIMER verdict.
+ *
+ * The verdict has to be sticky because the probe's own screen is transient:
+ * it paints, the boot moves on, and if the firmware then hangs three stages
+ * later the one fact worth knowing has already scrolled past. Carrying it in
+ * the bottom band of every subsequent stage means a single frozen screen
+ * answers both questions at once -- how far the boot got, and whether the
+ * timer under it was ever alive.
+ */
+void beacon_mark(uint32_t top);
+
 #endif /* __BOOT_BEACON_H__ */

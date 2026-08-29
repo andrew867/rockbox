@@ -61,10 +61,39 @@ static inline int __get_sp(void)
     return sp;
 }
 
+/*
+ * Microsecond delay, with an escape hatch.
+ *
+ * This used to be the bare loop, which is correct exactly as long as
+ * USEC_TIMER counts -- and Timer E's register offsets on this SoC are assumed
+ * to match the s5l8720 layout rather than confirmed. If that assumption is
+ * wrong the timer never advances, TIME_BEFORE stays true forever, and this
+ * function -- called from nearly every driver in the port -- hangs the whole
+ * firmware with no output and no way to tell which caller was unlucky.
+ *
+ * A single wrong register offset should not be able to do that. The iteration
+ * guard cannot make the delay correct on a dead timer, and does not try to:
+ * it makes a dead timer degrade into "delays are wrong and the boot carries
+ * on and can report itself" instead of "everything stops, silently". Those
+ * are very different failures to be handed.
+ *
+ * The bound is deliberately loose -- far more iterations than a live timer
+ * could ever need for the same wait -- so it never trips on healthy hardware
+ * and stays a backstop rather than a second, competing timeout.
+ */
+#define UDELAY_GUARD_MAX    200000000u
+
 static inline void udelay(unsigned usecs)
 {
     unsigned stop = USEC_TIMER + usecs;
-    while (TIME_BEFORE(USEC_TIMER, stop));
+    unsigned guard = (usecs < (UDELAY_GUARD_MAX / 2000u))
+                   ? (usecs * 2000u + 100000u)
+                   : UDELAY_GUARD_MAX;
+
+    while (TIME_BEFORE(USEC_TIMER, stop)) {
+        if (--guard == 0)
+            break;
+    }
 }
 
 #endif /* SYSTEM_TARGET_H */
