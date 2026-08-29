@@ -22,6 +22,7 @@
 #include "storage.h"
 #include "nand-s5l8740.h"
 #include "ftl-s5l8740.h"
+#include "boot-beacon.h"
 
 /*
  * Rockbox asks for 4096-byte sectors (SECTOR_SIZE in the board config), which
@@ -43,17 +44,42 @@ int nand_init(void)
         return 0;   /* no storage, but the firmware still runs */
 
     /*
-     * The FTL scan is DEFERRED while the port is still being brought up.
+     * The FTL scan runs at boot again.
      *
-     * Rebuilding the map means ~16,700 page reads before the UI appears, on a
-     * NAND path that has never run on hardware. If any of it hangs, it hangs
-     * in the middle of boot and looks exactly like a dead firmware -- and on
-     * a device with no serial console there is no way to tell those apart.
+     * It was deferred for a specific reason, and that reason has expired.
+     * Rebuilding the map is ~16,700 page reads on a NAND path that had never
+     * run on hardware, and a hang in the middle of it was indistinguishable
+     * from dead firmware on a device with no serial console. The condition
+     * attached to the deferral was that everything else had to be seen
+     * working first.
      *
-     * So storage is opt-in for now: everything else has to be seen working
-     * first. Call ftl_mount_now() from the debug menu to run the scan once
-     * there is a screen to watch it on.
+     * It has been: the panel, the logo and Rockbox's own USB screen all
+     * render, and the assembly and C beacons both paint reliably. A hang in
+     * here is now a visible event with an address rather than a black screen,
+     * which is exactly what was missing before.
+     *
+     * Leaving it deferred has its own cost, and it is no longer the smaller
+     * one. With no map there is no partition, so disk_mount_all() fails, and
+     * usb_slave_mode(false) panics with "mount: 0" the moment the host
+     * releases storage back to us -- which is what happens on every USB
+     * unplug. The firmware cannot survive a cable event without storage.
+     *
+     * Bracketed with beacons so a stall names its own phase.
      */
+    beacon_mark(BEACON_MAGENTA);
+
+    if (ftl_recover() == 0) {
+        storage_ready = true;
+        beacon_mark(BEACON_CYAN);
+    } else {
+        /*
+         * Not fatal here. Reporting a clean "no storage" lets the firmware
+         * finish booting and say so on a working screen, which is far more
+         * useful than refusing to start.
+         */
+        beacon_mark(BEACON_RED);
+    }
+
     last_disk_activity = current_tick;
     return 0;
 }
