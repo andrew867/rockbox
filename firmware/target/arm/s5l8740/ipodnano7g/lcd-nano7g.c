@@ -203,22 +203,45 @@ static void lcdif_run(void)
 void lcd_init_device(void)
 {
     /*
-     * U-Boot has already brought the panel up and is showing something, so
-     * the rail is live and the LCDIF is running. Reprogramming it for our
-     * geometry is enough; a full off/on cycle would blank the screen for no
-     * benefit during boot.
+     * Adopt the running interface. Deliberately touch nothing.
+     *
+     * This used to call lcdif_reset() + lcdif_program() + lcdif_run(), and it
+     * hung on the first one, every time. The reason is worth writing down,
+     * because the fix is "do less" and that always looks like giving up:
+     *
+     * We do not need any of it. U-Boot hands over with the LCDIF clocked,
+     * running and scanning out its logo, and the assembly beacons in crt0
+     * prove pixels land with zero setup -- two MMIO stores, before the C
+     * runtime exists. The reset sequence existed to reach a state we are
+     * already in.
+     *
+     * And it cannot be done safely from here. lcdif_reset() gates the LCDIF
+     * clocks off and then reads the block's registers; an MMIO read from a
+     * block with no clock stalls the bus, which is a hang inside a single
+     * load instruction that no loop guard or timeout can break out of. That
+     * is exactly what the beacon reported: red top (gates dropped) with a
+     * GREEN bottom band confirming USEC_TIMER was counting fine the whole
+     * time. The timeouts were healthy; the code never got back to them.
+     *
+     * Linux runs this same sequence successfully, which is why it was ported
+     * faithfully -- but it resets an idle LCDIF that DRM has already shut
+     * down, not one mid-scanout. The sequence is correct; performing it on a
+     * live interface is not.
+     *
+     * lcdif_run() is skipped for a second, independent reason: it rewrites
+     * CON when the MODE/FMT bits do not match CON_BASE, and CON_BASE asks for
+     * zero in both. The format currently in CON is the one the panel is
+     * demonstrably working with -- XRGB8888, inherited from the bootloader
+     * and never programmed by Linux either. Overwriting it would trade a
+     * known-good display for an assumption.
+     *
+     * The full path stays for lcd_power(), where the block really has been
+     * stopped and a reset is both safe and necessary.
      *
      * TODO: the display rail is a PMIC control (see lcd_manage_rail in the
      * Linux driver). Until the D1830 driver lands in Phase 3 we rely on
-     * whatever the previous stage left enabled, which is why lcd_enable()
-     * below only stops and starts the interface.
+     * whatever the previous stage left enabled.
      */
-    lcdif_reset();
-    lcdif_program();
-
-    beacon_split(BEACON_WHITE, BEACON_RED);
-
-    lcdif_run();
     lcd_on = true;
 
     /*
