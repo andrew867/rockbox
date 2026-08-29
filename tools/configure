@@ -601,6 +601,16 @@ arm7ejscc () {
  endian="little"
 }
 
+# Cortex-A5 (ARMv7-A). Bare metal, so softfp: the VFP is not enabled until
+# system_init() and nothing in the core needs it. Kept -marm because the
+# exception vectors and cache maintenance in mmu-armv7a.S are ARM state.
+cortexa5cc () {
+ findarmgcc
+ GCCOPTS="$CCOPTS -mcpu=cortex-a5 -marm -mfloat-abi=softfp -mfpu=vfpv4-d16"
+ GCCOPTIMIZE="-fomit-frame-pointer"
+ endian="little"
+}
+
 armcortexm7cc () {
  findarmgcc
  GCCOPTS="$CCOPTS -march=armv7e-m -mcpu=cortex-m7"
@@ -1696,7 +1706,7 @@ cat <<EOF
                            29) Classic/6G        55) Sansa Clip
  ==Olympus=                80) Nano 3G (WIP)     56) Sansa e200v2
  70) M:Robe 500            81) Nano 4G (WIP)     57) Sansa m200v4
- 71) M:Robe 100                                  58) Sansa Fuze
+ 71) M:Robe 100            82) Nano 7G (WIP)     58) Sansa Fuze
                            ==Creative==          59) Sansa c200v2
  ==Philips==               89) Zen X-Fi Style    60) Sansa Clipv2
  100) GoGear SA9200        93) Zen X-Fi2         62) Sansa Clip+
@@ -2675,6 +2685,31 @@ fi
     t_cpu="arm"
     t_manufacturer="s5l8702"
     t_model="ipodnano4g"
+    ;;
+
+   82|ipodnano7g)
+    target_id=126
+    modelname="ipodnano7g"
+    target="IPOD_NANO7G"
+    memory=64 # always
+    cortexa5cc
+    tool="$rootdir/tools/scramble -add=nn7g"
+    bmp2rb_mono="$rootdir/tools/bmp2rb -f 0"
+    bmp2rb_native="$rootdir/tools/bmp2rb -f 4"
+    output="rockbox.ipod"
+    appextra="recorder:gui:radio"
+    # Plugins are off until the port has a settled keymap: every game carries
+    # its own per-keypad #ifdef ladder, and adding IPOD_NANO7G_PAD to all of
+    # them before the touchscreen driver exists would only have to be redone.
+    plugins="no"
+    bootoutput="bootloader-$modelname.ipod"
+    # toolset is the tools within the tools directory that we build for
+    # this particular target.
+    toolset=$ipodbitmaptools
+    # architecture, manufacturer and model for the target-tree build
+    t_cpu="arm"
+    t_manufacturer="s5l8740"
+    t_model="ipodnano7g"
     ;;
 
    89|creativezenxfistyle)
