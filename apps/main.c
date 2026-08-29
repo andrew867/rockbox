@@ -778,6 +778,16 @@ static void init(void)
          * hang inside it AND with it returning into something that hangs
          * later. Those need entirely different work.
          */
+        /*
+         * The verdict as a beacon too: a split screen cannot be confused with
+         * any of the solid call-site colours above it.
+         *   white over green  the mount returned something
+         *   white over red    it returned nothing
+         */
+#ifdef IPOD_NANO7G
+        beacon_split(BEACON_WHITE, rc > 0 ? BEACON_GREEN : BEACON_RED);
+        sleep(3 * HZ);
+#endif
         n7g_stage_num("mount rc", rc);
         if (rc<=0)
         {

@@ -79,6 +79,7 @@
 #define BEACON_CYAN     0x0000ffff
 #define BEACON_BLUE     0x000000ff
 #define BEACON_MAGENTA  0x00ff00ff
+#define BEACON_PURPLE   0x008000ff
 #define BEACON_WHITE    0x00ffffff
 #define BEACON_BLACK    0x00000000
 

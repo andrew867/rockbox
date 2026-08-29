@@ -57,24 +57,46 @@ bool mount_done;
 void n31_trace(const char *tag)
 {
     /*
-     * Prove entry before touching the display. If ORANGE (before the call)
-     * appears and this CYAN does not, the hang is the call itself; if both
-     * appear and no text follows, the LCD path is what is stuck.
+     * Beacons only. No text, no viewport, no lcd_update().
+     *
+     * The cyan checkpoint at the top of this function painted and the text
+     * below it never did -- the screen went black, which is
+     * lcd_clear_display() landing and lcd_putsxy() producing nothing. So the C
+     * display path is broken here, and every diagnostic written through it has
+     * been reporting in a medium that cannot report its own failure. That is
+     * why nine markers looked like zero markers.
+     *
+     * beacon_stage() writes pixels with raw MMIO and a bounded spin. It has
+     * worked at every point in this port, including before the C runtime
+     * existed, so a mount trace built on it says something even when the
+     * display driver does not.
+     *
+     * One colour per call site, held long enough to read.
      */
-    beacon_stage(BEACON_CYAN);
+    static const struct {
+        const char *tag;
+        uint32_t    colour;
+    } map[] = {
+        { "all:lock",     BEACON_RED     },
+        { "all:unmount",  BEACON_ORANGE  },
+        { "all:fat_init", BEACON_YELLOW  },
+        { "all:present",  BEACON_GREEN   },
+        { "all:mount",    BEACON_CYAN    },
+        { "m:free_vol",   BEACON_BLUE    },
+        { "m:disk_init",  BEACON_MAGENTA },
+        { "m:fat_mount0", BEACON_PURPLE  },
+        { "m:part",       BEACON_WHITE   },
+    };
+    unsigned i;
 
-    lcd_clear_display();
-    lcd_putsxy(4, 4,  "N7G disk");
-    lcd_putsxy(4, 20, tag);
-    lcd_update();
+    for (i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (!strcmp(tag, map[i].tag)) {
+            beacon_stage(map[i].colour);
+            break;
+        }
+    }
 
-    /*
-     * Hold. Without this the nine markers flash past in under 200ms, which
-     * looks identical to none of them painting at all -- and "nothing
-     * appeared" was read as "the function is never entered" when it may
-     * simply have been too fast to see.
-     */
-    sleep(HZ / 4);
+    sleep(HZ / 2);
 }
 
 /* Points at the trace counter while the mount is running; NULL after. */
