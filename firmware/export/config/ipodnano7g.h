@@ -70,6 +70,39 @@
 #define HAVE_OPTIONAL_STORAGE
 
 /*
+ * Debug console over USB.
+ *
+ * There is no serial port on this device in any practical sense -- no DCSD
+ * cable, no access to SEC UART3 -- which is why the whole bring-up was done
+ * with coloured beacons. USB CDC is the only text channel available.
+ *
+ * Rockbox already has the pieces: usb_serial.c is a CDC class driver, and
+ * logf.c pushes every logf() line straight to usb_serial_send(). Both are
+ * simply switched off on every iPod target. Turning them on costs one USB
+ * interface and gives running commentary instead of a colour.
+ */
+#define ROCKBOX_HAS_LOGF
+#define USB_ENABLE_SERIAL
+
+/*
+ * Serial-only USB, for when the UI has to stay usable.
+ *
+ * With mass storage enabled, plugging a cable does what it does on every
+ * Rockbox target: storage is handed to the host and the firmware switches to
+ * the USB screen. That is correct behaviour and it is not what you want while
+ * watching the device do something.
+ *
+ * The takeover comes specifically from the mass-storage driver requesting
+ * exclusive storage -- nothing else asks for it. So a build with storage
+ * declined keeps the UI live, keeps the disk ours, and still enumerates the
+ * serial interface. The cable becomes a console rather than a mode switch.
+ *
+ * Off by default: losing disk access over USB is too high a price for the
+ * ordinary case. Turn it on for a debugging build.
+ */
+/* #define N31_USB_SERIAL_ONLY */
+
+/*
  * USB monitoring is back on.
  *
  * It was off while the FTL was being brought up, because a cable event takes

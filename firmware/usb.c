@@ -238,7 +238,16 @@ static inline void usb_configure_drivers(int for_state)
 
     case USB_INSERTED:
 #ifdef USB_ENABLE_STORAGE
+        /*
+         * Declining mass storage is what keeps the UI alive: it is the only
+         * driver that requests exclusive storage, and that request is what
+         * moves the firmware to the USB screen. Serial still enumerates.
+         */
+#ifdef N31_USB_SERIAL_ONLY
+        usb_core_enable_driver(USB_DRIVER_MASS_STORAGE, false);
+#else
         usb_core_enable_driver(USB_DRIVER_MASS_STORAGE, true);
+#endif
 #endif
 #ifdef USB_ENABLE_HID
         usb_core_enable_driver(USB_DRIVER_HID, usb_hid);

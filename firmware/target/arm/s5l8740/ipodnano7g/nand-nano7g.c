@@ -89,7 +89,17 @@ int nand_init(void)
      *       the map is built and FAT does not recognise it -- an L2V or
      *       address-translation problem, not a storage one
      */
-    {
+    /*
+     * Report only a FAILED mount, and only then hold the boot.
+     *
+     * A working mount has nothing to say that is worth two seconds of every
+     * startup -- the progress bar already showed the work happening, and
+     * stopping afterwards to display "it worked" is the firmware admiring
+     * itself. A failure is different: these numbers are the entire account of
+     * what went wrong, and without them the next symptom is a panic several
+     * seconds later with none of this on screen.
+     */
+    if (!storage_ready) {
         unsigned ranges = 0, mapped = 0, closed = 0, open = 0;
         unsigned written = 0, empty = 0, replayed = 0, dropped = 0;
         bool cxt = false;
@@ -105,13 +115,7 @@ int nand_init(void)
         lcd_putsf(0, 4, "cl %u  op %u  drop %u", closed, open, dropped);
         lcd_update();
 
-        /*
-         * Linger only when something went wrong. A working mount does not
-         * need to hold the boot for five seconds every time -- but a failure
-         * still has to be readable, because the numbers above it are the only
-         * account of what happened.
-         */
-        sleep(storage_ready ? HZ : 5 * HZ);
+        sleep(5 * HZ);
     }
 
     beacon_mark(storage_ready ? BEACON_BLUE : BEACON_RED);

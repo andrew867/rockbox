@@ -19,6 +19,7 @@
  *
  ****************************************************************************/
 #include <string.h>
+#include <stdio.h>
 #include "config.h"
 #include "system.h"
 #include "kernel.h"
@@ -573,15 +574,45 @@ static bool find_fat_base(void)
 #define PROG_BAR_W      (LCD_WIDTH - 2 * PROG_BAR_X)
 #define PROG_BAR_H      14
 
+/*
+ * Absolute pixel positions, not line indices.
+ *
+ * lcd_putsf() takes a LINE number and draws through the viewport's text
+ * cursor, which advances -- so repainting in a loop walked the display
+ * steadily downwards instead of overwriting itself. A progress indicator that
+ * scrolls is not showing progress, it is producing a log.
+ *
+ * Drawing at fixed coordinates makes every repaint land on the previous one
+ * by construction, with no dependence on cursor or viewport state.
+ */
+#define PROG_TEXT_X     4
+#define PROG_LINE_H     12
+#define PROG_LINE0_Y    4
+
 static void ftl_progress_paint(void)
 {
+    char buf[48];
     unsigned filled = 0;
 
-    lcd_clear_display();
-    lcd_putsf(0, 0, "FTL %s", prog_phase);
-    lcd_putsf(0, 1, "%u / %u", prog_cur, prog_total);
-    if (prog_want)
-        lcd_putsf(0, 2, "open %u / %u", prog_found, prog_want);
+    /*
+     * Clear only our band, and do it by drawing background rather than
+     * lcd_clear_display(). Clearing the whole display each pass wipes
+     * everything else on screen for a region we then never push.
+     */
+    lcd_set_drawmode(DRMODE_SOLID | DRMODE_INVERSEVID);
+    lcd_fillrect(0, 0, LCD_WIDTH, PROG_BAND_H);
+    lcd_set_drawmode(DRMODE_SOLID);
+
+    snprintf(buf, sizeof(buf), "FTL %s", prog_phase);
+    lcd_putsxy(PROG_TEXT_X, PROG_LINE0_Y, buf);
+
+    snprintf(buf, sizeof(buf), "%u / %u", prog_cur, prog_total);
+    lcd_putsxy(PROG_TEXT_X, PROG_LINE0_Y + PROG_LINE_H, buf);
+
+    if (prog_want) {
+        snprintf(buf, sizeof(buf), "open %u / %u", prog_found, prog_want);
+        lcd_putsxy(PROG_TEXT_X, PROG_LINE0_Y + 2 * PROG_LINE_H, buf);
+    }
 
     /*
      * Clamp rather than trust the ratio. prog_cur is advanced from several
