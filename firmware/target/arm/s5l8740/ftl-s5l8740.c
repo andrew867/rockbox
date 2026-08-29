@@ -100,6 +100,7 @@ static unsigned stat_mapped;
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
+static unsigned prog_found, prog_want;
 
 /* One page's worth of scratch, reused throughout. */
 static struct nand_cs_page scratch;
@@ -516,6 +517,8 @@ static void ftl_progress_paint(void)
     lcd_clear_display();
     lcd_putsf(0, 0, "FTL %s", prog_phase);
     lcd_putsf(0, 1, "%u / %u", prog_cur, prog_total);
+    if (prog_want)
+        lcd_putsf(0, 2, "open %u / %u", prog_found, prog_want);
     lcd_update_rect(0, 0, LCD_WIDTH, PROG_BAND_H);
 }
 
@@ -615,18 +618,40 @@ int ftl_recover(void)
 
     /* Pass two: walk the open superblocks page by page. */
     prog_phase = "open";
+    /*
+     * Pass two counts the SWEEP, not the findings.
+     *
+     * This used to set prog_total = stat_sbs_open and advance prog_cur only
+     * when an open superblock was found. That measures the wrong thing: the
+     * work here is a second full 8352-block re-read of every BTOC page, and
+     * open superblocks are rare, so the number sat still for minutes at a
+     * time while the device was busy. On screen that is indistinguishable
+     * from a hang -- which is exactly how it was reported, right after pass
+     * one had finished cleanly at 8320/8352.
+     *
+     * A progress counter has one job: move when work is happening. The
+     * open-superblock tally is still worth seeing, so it gets its own line
+     * rather than being smuggled into the main one.
+     */
     prog_cur = 0;
-    prog_total = stat_sbs_open;
+    prog_total = SB_COUNT * BANKS;
+    prog_found = 0;
+    prog_want = stat_sbs_open;
 
     prog_phase = "btoc";
     if (stat_sbs_open) {
         unsigned done = 0;
+        unsigned swept = 0;
 
         for (block = 0; block < SB_COUNT && done < stat_sbs_open; block++) {
             for (ce = 0; ce < NAND_MAX_CE; ce++) {
                 for (cau = 0; cau < NAND_MAX_CAU; cau++) {
                     unsigned s;
                     bool is_btoc = false;
+
+                    prog_cur = ++swept;
+                    if ((swept % PROG_EVERY) == 0)
+                        ftl_progress_paint();
 
                     if (nand_cs_phys_read(ce, cau, block, NAND_BTOC_PAGE,
                                           &scratch))
@@ -645,13 +670,16 @@ int ftl_recover(void)
                         continue;
 
                     rebuild_open_sb(ce, cau, block);
-                    prog_cur = ++done;
+                    prog_found = ++done;
+                    ftl_progress_paint();
                 }
             }
         }
     }
 
+    prog_want = 0;
     prog_phase = "pack";
+    ftl_progress_paint();
     ranges_coalesce();
 
     if (!range_count)
@@ -660,6 +688,7 @@ int ftl_recover(void)
     ftl_is_ready = true;
 
     prog_phase = "bpb";
+    ftl_progress_paint();
     if (!find_fat_base()) {
         /*
          * A map with no recognisable boot sector is not a mountable volume.
@@ -668,10 +697,12 @@ int ftl_recover(void)
          */
         ftl_is_ready = false;
         prog_phase = "no-bpb";
+        ftl_progress_paint();
         return -1;
     }
 
     prog_phase = "ready";
+    ftl_progress_paint();
     return 0;
 }
 
