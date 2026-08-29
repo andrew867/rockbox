@@ -601,12 +601,40 @@ arm7ejscc () {
  endian="little"
 }
 
-# Cortex-A5 (ARMv7-A). Bare metal, so softfp: the VFP is not enabled until
-# system_init() and nothing in the core needs it. Kept -marm because the
-# exception vectors and cache maintenance in mmu-armv7a.S are ARM state.
+# Cortex-A5 (ARMv7-A), bare metal.
+#
+# Hard soft-float: no FPU, no VFP registers, no VFP instructions anywhere.
+#
+# This was -mfloat-abi=softfp -mfpu=vfpv4-d16, on the reasoning that softfp
+# only changes how floats are PASSED and the core does not use floats anyway.
+# That reasoning is wrong in a way that took a crash to see: softfp still lets
+# GCC allocate VFP registers internally, for anything it likes -- 64-bit moves,
+# struct copies, register pressure relief. The build had 311 VFP instructions
+# in it, and usb_core_handle_transfer_completion() opened its prologue with
+# "vpush {d8}". With no FPU enabled that is an undefined instruction, which is
+# exactly where the first real boot stopped.
+#
+# The fix is NOT to enable the FPU. That would make those 311 instructions
+# legal and introduce a far worse bug in their place: Rockbox's context switch
+# saves and restores integer registers only. d8-d15 are callee-saved, so a
+# thread preempted between its vpush and its vpop has its live VFP state
+# silently overwritten by any other thread that touches the same register --
+# intermittent, data-dependent corruption with no fault to catch it. A clean
+# undefined-instruction abort is a much better failure than that.
+#
+# Enabling the VFP is only correct once the scheduler saves it, and there is
+# nothing to gain by rushing it: Rockbox is fixed-point end to end -- codecs,
+# DSP and UI alike -- so soft-float costs nothing measurable here.
+#
+# No -mfpu at all: -mfloat-abi=soft already suppresses FPU codegen, and this
+# toolchain's GCC does not accept -mfpu=none, so naming it would only break
+# the build for no added guarantee.
+#
+# Kept -marm because the exception vectors and cache maintenance in
+# mmu-armv7a.S are ARM state.
 cortexa5cc () {
  findarmgcc
- GCCOPTS="$CCOPTS -mcpu=cortex-a5 -marm -mfloat-abi=softfp -mfpu=vfpv4-d16"
+ GCCOPTS="$CCOPTS -mcpu=cortex-a5 -marm -mfloat-abi=soft"
  GCCOPTIMIZE="-fomit-frame-pointer"
  endian="little"
 }
