@@ -87,11 +87,19 @@
  * writing down where things are. Linux hit precisely that at 200000 nodes and
  * lost 39512 extents to it.
  *
- * A range is 24 bytes, so this ceiling is about 780 KB of a 64 MB DRAM, and it
- * is a ceiling rather than an allocation -- entries exist only for extents that
- * exist. Headroom is close to free; silent truncation is not.
+ * Raised again once the weave filter was fixed. That fix turns "replayed 2 of
+ * 2308" into a real replay of every superblock the checkpoint does not cover,
+ * and all of that has to land somewhere -- the previous ceiling was sized for
+ * a run that was silently discarding the work.
+ *
+ * A range is 24 bytes, so this ceiling is about 3 MB of a 64 MB DRAM, and it
+ * is a ceiling rather than an allocation -- entries exist only for extents
+ * that exist. Deliberately far above any measured figure: the Linux driver
+ * runs with a 500000-node ceiling on the same volume, and the point is to find
+ * out whether we overflow rather than to quietly stop at a tidy number.
+ * Headroom is close to free; silent truncation is not.
  */
-#define MAX_RANGES          32768
+#define MAX_RANGES          131072
 
 /* LBA values that mean "nothing here" rather than a real mapping. */
 #define LBA_BLANK           0xffffffffu
@@ -113,6 +121,7 @@ static unsigned stat_mapped;
 static unsigned stat_probe_empty;
 static unsigned stat_cxt_oob;       /* extents pointing outside the device */
 static unsigned stat_cxt_self;      /* extents inside a context superblock */
+static unsigned stat_skipped;       /* closed SBs the checkpoint already covers */
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
@@ -937,6 +946,7 @@ static bool sb_sweep_page0(void)
     sb_list_count = 0;
     stat_probe_empty = 0;
     stat_cxt_oob = stat_cxt_self = 0;
+    stat_skipped = 0;
 
     prog_phase = "scan";
     prog_total = SB_COUNT * BANKS;
@@ -1127,9 +1137,27 @@ int ftl_recover(void)
         if ((prog_cur % PROG_EVERY) == 0)
             ftl_progress_paint();
 
-        if (cxt_loaded && sb_list[i].weave <= cxt_weave)
-            continue;
-
+        /*
+         * The skip decision CANNOT be made from the weave recorded by the
+         * page-0 sweep, and making it there is a bug that hides itself
+         * perfectly.
+         *
+         * Page 0's weave is stamped when the superblock is OPENED -- it is the
+         * oldest thing in the block. A superblock being appended to right up
+         * until the moment power went away still has an ancient page 0. So
+         * testing it against the checkpoint declares essentially every block
+         * on the volume older than the checkpoint, and the replay skips all of
+         * them.
+         *
+         * That is what "replayed 2 of 2308" was. It read like the weave filter
+         * working beautifully; it was the filter discarding the entire post-
+         * checkpoint history of the device. The resulting map is an exact copy
+         * of the checkpoint with nothing after it -- which is precisely the FAT
+         * and directory blocks written most recently, hence a volume that
+         * builds a plausible map and then will not mount.
+         *
+         * So read page 127 first and decide from what is actually there.
+         */
         if (nand_cs_phys_read(sb_list[i].ce, sb_list[i].cau,
                               sb_list[i].block, NAND_BTOC_PAGE, &scratch))
             continue;
@@ -1145,15 +1173,32 @@ int ftl_recover(void)
             }
         }
 
-        prog_found++;
-
         if (is_btoc) {
+            /*
+             * Closed. The BTOC weave is written when the block is SEALED, so
+             * nothing inside it is newer -- which makes it the only weave here
+             * safe to skip on.
+             */
+            if (cxt_loaded && weave <= cxt_weave) {
+                stat_skipped++;
+                continue;
+            }
+
+            prog_found++;
             stat_sbs_closed++;
             btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
                         sb_list[i].ce, sb_list[i].cau, sb_list[i].block,
                         weave);
         } else {
-            /* Written, no BTOC: still open. Rebuild it page by page. */
+            /*
+             * Open, and NEVER skipped regardless of the checkpoint.
+             *
+             * Open means still being written, which is exactly where
+             * post-checkpoint data lives, and no single page in it bounds the
+             * rest -- there is no weave that can honestly say "everything here
+             * predates the snapshot".
+             */
+            prog_found++;
             stat_sbs_open++;
             rebuild_open_sb(sb_list[i].ce, sb_list[i].cau, sb_list[i].block);
         }
@@ -1281,7 +1326,8 @@ uint32_t ftl_disk_sectors(void)
  * screen and everything after it is guesswork.
  */
 void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
-                       unsigned *replayed, unsigned *dropped)
+                       unsigned *replayed, unsigned *dropped,
+                       unsigned *skipped, bool *overflow)
 {
     if (loaded)
         *loaded = cxt_loaded;
@@ -1291,6 +1337,10 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
         *empty = stat_probe_empty;
     if (dropped)
         *dropped = stat_cxt_oob + stat_cxt_self;
+    if (skipped)
+        *skipped = stat_skipped;
+    if (overflow)
+        *overflow = ranges_overflowed;
     if (replayed)
         *replayed = prog_found;
 }
