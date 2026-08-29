@@ -17,32 +17,36 @@
  * KIND, either express or implied.
  *
  ****************************************************************************/
+#include <string.h>
 #include "config.h"
 #include "system.h"
 #include "i2c-s5l8740.h"
 #include "tristar-nano7g.h"
 
 /*
- * Detection only, and deliberately read-only.
+ * Identification only, and deliberately read-only.
  *
- * Routing on this part happens over IDBUS inside the chip, not through
- * host-written Dx mux registers -- RetailOS writes no mux map, and inventing
- * one risks leaving the connector in a state the stock firmware cannot
- * recover. So this reads identity and reports it; it never writes.
+ * "Mux map" is a misleading way to think about this part. Routing happens
+ * over IDBUS *inside* the chip: the accessory presents an ID, and the
+ * CBTL1609 programs its own ACCx/Dx switches from it per the THS7383 tables.
+ * RetailOS on N31 was observed writing zero Dx/mux registers over I2C. There
+ * is no host-side mux map to implement, and inventing one risks leaving the
+ * connector in a state the stock firmware cannot recover from.
+ *
+ * What the host CAN do is read the ID and know what is plugged in. That is
+ * what this does.
  *
  * The chip is on IIC1 (NOT IIC0, despite what the first device tree said) at
  * 7-bit 0x1a, which is 8-bit 0x34 write / 0x35 read.
  *
- * Reading all 0x35 back is the classic false positive here: that is the bus
+ * Reading all 0x35 back is the classic false positive: that is the bus
  * echoing the 8-bit read address, not a register dump. A flat buffer of the
- * address byte means the transfer did not really happen, so treat it as
- * "not present" rather than as data.
+ * address byte means the transfer did not really happen.
  */
 #define TRISTAR_BUS     I2C_BUS_IIC1
 #define TRISTAR_ADDR    I2C_ADDR_TRISTAR
 
-#define TRISTAR_REG_ID0     0x00
-#define TRISTAR_REG_ID1     0x01
+#define TRISTAR_DUMP_LEN    0x40
 
 /* The 8-bit read address, which is what a dead bus echoes back. */
 #define I2C_ADDR_ECHO       0x35
@@ -50,43 +54,128 @@
 #define TS_ID_ACCX(id0)     (((id0) >> 6) & 3)
 #define TS_ID_DX(id0)       (((id0) >> 4) & 3)
 
-static bool tristar_present = false;
+/*
+ * Known Lightning accessory signatures (nyansatan's ID table, HOSTID=1).
+ * The six-byte signature appears at an unpredictable offset inside the dump,
+ * so it is searched for rather than read from a fixed register.
+ */
+struct tristar_id_sig {
+    unsigned char bytes[6];
+    const char   *name;
+    enum tristar_accessory kind;
+};
+
+static const struct tristar_id_sig tristar_known_ids[] = {
+    { { 0x10, 0x0c, 0x00, 0x00, 0x00, 0x00 }, "usb-cable",           TRISTAR_ACC_USB },
+    { { 0x04, 0xf1, 0x00, 0x00, 0x00, 0x00 }, "lightning-analog",    TRISTAR_ACC_ANALOG },
+    { { 0x0b, 0xf0, 0x00, 0x00, 0x00, 0x00 }, "haywire-hdmi",        TRISTAR_ACC_VIDEO },
+    { { 0x20, 0x00, 0x00, 0x00, 0x00, 0x00 }, "dcsd-or-uart-charge", TRISTAR_ACC_SERIAL },
+    { { 0x20, 0x02, 0x00, 0x00, 0x00, 0x00 }, "kong-swd-idle",       TRISTAR_ACC_SERIAL },
+    { { 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00 }, "kong-swd-astris",     TRISTAR_ACC_SERIAL },
+    { { 0x20, 0x0e, 0x00, 0x00, 0x00, 0x00 }, "kanzi-swd-idle",      TRISTAR_ACC_SERIAL },
+    { { 0xa0, 0x0c, 0x00, 0x00, 0x00, 0x00 }, "kanzi-swd-astris",    TRISTAR_ACC_SERIAL },
+    { { 0x20, 0x00, 0x10, 0x00, 0x00, 0x00 }, "uart-charge",         TRISTAR_ACC_SERIAL },
+};
+
+static bool tristar_present;
+static unsigned char last_dump[TRISTAR_DUMP_LEN];
+static struct tristar_id cached;
+
+/* Read the full register window. False if it did not happen for real. */
+static bool tristar_dump(void)
+{
+    int i;
+    bool flat = true;
+    bool echo = true;
+
+    if (i2c_read(TRISTAR_BUS, TRISTAR_ADDR, 0x00,
+                 TRISTAR_DUMP_LEN, last_dump) < 0)
+        return false;
+
+    for (i = 0; i < TRISTAR_DUMP_LEN; i++) {
+        if (last_dump[i] != I2C_ADDR_ECHO)
+            echo = false;
+        if (last_dump[i] != last_dump[0])
+            flat = false;
+    }
+
+    /*
+     * All-0x35 is the address echo. A flat dump of anything else is an idle
+     * connector, which is a real reading -- just not an accessory.
+     */
+    if (echo)
+        return false;
+
+    cached.flat = flat;
+    return true;
+}
 
 bool tristar_init(void)
 {
-    unsigned char id[2];
-
-    if (i2c_read(TRISTAR_BUS, TRISTAR_ADDR, TRISTAR_REG_ID0,
-                 sizeof(id), id) < 0)
-        return false;
-
-    /* Address echo, not a dump. */
-    if (id[0] == I2C_ADDR_ECHO && id[1] == I2C_ADDR_ECHO)
-        return false;
-
-    tristar_present = true;
-    return true;
+    tristar_present = tristar_dump();
+    return tristar_present;
 }
 
 bool tristar_read_id(struct tristar_id *out)
 {
-    unsigned char id[2];
+    unsigned s;
+    int off;
+
+    memset(&cached, 0, sizeof(cached));
+    cached.kind = TRISTAR_ACC_NONE;
+    cached.name = "unread";
 
     if (!tristar_present)
         return false;
 
-    if (i2c_read(TRISTAR_BUS, TRISTAR_ADDR, TRISTAR_REG_ID0,
-                 sizeof(id), id) < 0)
+    if (!tristar_dump()) {
+        cached.name = "i2c-echo";
         return false;
+    }
 
-    if (id[0] == I2C_ADDR_ECHO && id[1] == I2C_ADDR_ECHO)
-        return false;
+    if (cached.flat) {
+        cached.name = "idle";
+        cached.kind = TRISTAR_ACC_NONE;
+        if (out)
+            *out = cached;
+        return true;
+    }
 
-    out->id0  = id[0];
-    out->id1  = id[1];
-    out->accx = TS_ID_ACCX(id[0]);
-    out->dx   = TS_ID_DX(id[0]);
+    for (s = 0; s < ARRAYLEN(tristar_known_ids); s++) {
+        const struct tristar_id_sig *sig = &tristar_known_ids[s];
 
+        for (off = 0; off + 6 <= TRISTAR_DUMP_LEN; off++) {
+            if (memcmp(last_dump + off, sig->bytes, 6))
+                continue;
+
+            cached.id0  = sig->bytes[0];
+            cached.id1  = sig->bytes[1];
+            cached.accx = TS_ID_ACCX(sig->bytes[0]);
+            cached.dx   = TS_ID_DX(sig->bytes[0]);
+            cached.name = sig->name;
+            cached.kind = sig->kind;
+            cached.valid = true;
+
+            if (out)
+                *out = cached;
+            return true;
+        }
+    }
+
+    /*
+     * A non-flat dump with no matching signature is a real accessory we do
+     * not have an entry for. Report it as unknown with the raw bytes rather
+     * than guessing at what it might be.
+     */
+    cached.id0 = last_dump[0];
+    cached.id1 = last_dump[1];
+    cached.accx = TS_ID_ACCX(last_dump[0]);
+    cached.dx = TS_ID_DX(last_dump[0]);
+    cached.name = "unknown";
+    cached.kind = TRISTAR_ACC_UNKNOWN;
+
+    if (out)
+        *out = cached;
     return true;
 }
 
@@ -97,18 +186,25 @@ bool tristar_accessory_attached(void)
     if (!tristar_read_id(&id))
         return false;
 
-    /*
-     * An idle connector reads as a flat value with no IDBUS accessory. Any
-     * non-zero accessory/Dx field means something is on the other end.
-     *
-     * TODO: this distinguishes "something attached" from "nothing", which is
-     * all the mux map supports today. Telling a charger from a dock from a
-     * host needs the IDBUS decode, which is still open RE.
-     */
-    return (id.accx != 0) || (id.dx != 0);
+    return id.kind != TRISTAR_ACC_NONE;
+}
+
+const char *tristar_accessory_name(void)
+{
+    struct tristar_id id;
+
+    if (!tristar_read_id(&id))
+        return "unavailable";
+
+    return id.name;
 }
 
 bool tristar_available(void)
 {
     return tristar_present;
+}
+
+const unsigned char *tristar_last_dump(void)
+{
+    return last_dump;
 }

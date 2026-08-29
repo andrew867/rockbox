@@ -12,21 +12,33 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+enum tristar_accessory {
+    TRISTAR_ACC_NONE = 0,   /* idle connector */
+    TRISTAR_ACC_USB,        /* plain USB cable */
+    TRISTAR_ACC_ANALOG,     /* Lightning analog EarPods -- NOT the 3.5mm jack */
+    TRISTAR_ACC_VIDEO,      /* Haywire HDMI adapter */
+    TRISTAR_ACC_SERIAL,     /* DCSD / UART-charge / SWD debug bricks */
+    TRISTAR_ACC_UNKNOWN,    /* real accessory, no signature match */
+};
+
 struct tristar_id {
     uint8_t id0;
     uint8_t id1;
-    uint8_t accx;   /* id0 bits 7:6 */
-    uint8_t dx;     /* id0 bits 5:4 */
+    uint8_t accx;           /* id0 bits 7:6 */
+    uint8_t dx;             /* id0 bits 5:4 */
+    bool    valid;          /* matched a known signature */
+    bool    flat;           /* dump was uniform -- idle connector */
+    enum tristar_accessory kind;
+    const char *name;
 };
 
-/* Probe. False if the part does not answer, or the bus only echoes. */
 bool tristar_init(void);
-
 bool tristar_read_id(struct tristar_id *out);
-
-/* True when an IDBUS accessory is present on the Lightning connector. */
 bool tristar_accessory_attached(void);
-
+const char *tristar_accessory_name(void);
 bool tristar_available(void);
+
+/* Raw 0x40-byte register window, for the debug screens. */
+const unsigned char *tristar_last_dump(void);
 
 #endif /* __TRISTAR_NANO7G_H__ */
