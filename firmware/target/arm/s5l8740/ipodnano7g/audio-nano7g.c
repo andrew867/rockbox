@@ -1,0 +1,27 @@
+/***************************************************************************
+ * Audio routing for the iPod nano 7G (N31) -- Phase 4 placeholder.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ ****************************************************************************/
+#include "config.h"
+#include "audio.h"
+
+/*
+ * The playback chain is IIS0 @0x3CA00000 -> PL080 DMAC0 peri 10 -> CS42L81 on
+ * SPI0 -> headphone jack, with the D1830 sibling LDOs (regs 21-23 bit 4)
+ * powering the analog side.
+ *
+ * The digital transport is proven in Linux; the analog side is not -- a 1 kHz
+ * tone measures about -66 dBFS at the jack against RetailOS's -16 dBFS, with
+ * the PMIC's LDO registers reading 0x00 during playback. Phase 4 is blocked on
+ * that being solved in the Linux tree first, since the fix is shared.
+ */
+
+void audio_input_mux(int source, unsigned flags)
+{
+    (void)source;
+    (void)flags;
+}
