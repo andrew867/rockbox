@@ -70,14 +70,17 @@
 #define HAVE_OPTIONAL_STORAGE
 
 /*
- * Do not watch for USB cable events at boot, for now.
+ * USB monitoring is back on.
  *
- * A cable event is the loudest thing that can happen during bring-up: it
- * takes storage from the firmware and gives it to the host. It is also where
- * a failed mount surfaces, so attaching a cable to power the device replaces
- * the FTL diagnostics with a USB teardown. Off until the volume mounts.
+ * It was off while the FTL was being brought up, because a cable event takes
+ * storage from the firmware and hands it to the host -- and that is also
+ * exactly where a failed mount surfaced, so plugging in a cable to power the
+ * device replaced the FTL diagnostics with a USB teardown.
+ *
+ * The volume mounts now, so the condition has been met. HAVE_OPTIONAL_STORAGE
+ * stays: it costs nothing and means a future storage regression reports
+ * itself instead of panicking on the next cable event.
  */
-#define N31_USB_OFF_AT_BOOT
 
 #define LCD_DEPTH  16
 #define LCD_PIXELFORMAT RGB565

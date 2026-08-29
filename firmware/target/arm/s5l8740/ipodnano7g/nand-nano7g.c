@@ -105,7 +105,13 @@ int nand_init(void)
         lcd_putsf(0, 4, "cl %u  op %u  drop %u", closed, open, dropped);
         lcd_update();
 
-        sleep(5 * HZ);
+        /*
+         * Linger only when something went wrong. A working mount does not
+         * need to hold the boot for five seconds every time -- but a failure
+         * still has to be readable, because the numbers above it are the only
+         * account of what happened.
+         */
+        sleep(storage_ready ? HZ : 5 * HZ);
     }
 
     beacon_mark(storage_ready ? BEACON_BLUE : BEACON_RED);

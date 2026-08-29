@@ -553,15 +553,51 @@ static bool find_fat_base(void)
  * make the display, not the NAND, the reason the mount was slow.
  */
 #define PROG_EVERY      64
-#define PROG_BAND_H     40
+#define PROG_BAND_H     80
+
+/*
+ * A real bar, not just a count.
+ *
+ * The numbers alone answer "is it moving", which was the original question,
+ * but they answer it badly: 4032/8352 requires reading two figures and doing
+ * arithmetic to learn something a filled rectangle says at a glance. During a
+ * mount that takes tens of seconds and passes through six phases with
+ * different totals, at-a-glance is the whole point.
+ *
+ * Each phase drives the bar with its own total, so it fills and resets per
+ * phase rather than pretending the mount is one uniform job. The phase name
+ * above it says which one is running.
+ */
+#define PROG_BAR_X      8
+#define PROG_BAR_Y      52
+#define PROG_BAR_W      (LCD_WIDTH - 2 * PROG_BAR_X)
+#define PROG_BAR_H      14
 
 static void ftl_progress_paint(void)
 {
+    unsigned filled = 0;
+
     lcd_clear_display();
     lcd_putsf(0, 0, "FTL %s", prog_phase);
     lcd_putsf(0, 1, "%u / %u", prog_cur, prog_total);
     if (prog_want)
         lcd_putsf(0, 2, "open %u / %u", prog_found, prog_want);
+
+    /*
+     * Clamp rather than trust the ratio. prog_cur is advanced from several
+     * loops and a phase that overshoots its estimate would otherwise draw
+     * past the end of the frame.
+     */
+    if (prog_total) {
+        unsigned cur = (prog_cur > prog_total) ? prog_total : prog_cur;
+
+        filled = (unsigned)(((uint64_t)cur * (PROG_BAR_W - 2)) / prog_total);
+    }
+
+    lcd_drawrect(PROG_BAR_X, PROG_BAR_Y, PROG_BAR_W, PROG_BAR_H);
+    if (filled)
+        lcd_fillrect(PROG_BAR_X + 1, PROG_BAR_Y + 1, filled, PROG_BAR_H - 2);
+
     lcd_update_rect(0, 0, LCD_WIDTH, PROG_BAND_H);
 }
 
