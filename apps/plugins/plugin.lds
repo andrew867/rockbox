@@ -107,6 +107,15 @@ OUTPUT_FORMAT(elf32-littlemips)
 #define IRAMORIG (0x00000000 + (56*1024))
 #define IRAMSIZE (136*1024)
 
+#elif CONFIG_CPU==S5L8740
+/*
+ * N31 runs entirely from DRAM -- the SEC IRAM is 128 KB and shared with the
+ * DFU ROM and U-Boot, so no IRAMORIG/IRAMSIZE is defined here and USE_IRAM
+ * must stay off for this target.
+ */
+#define DRAMORIG 0x08000000
+#define DRAMSIZE (DRAM_SIZE - PLUGIN_BUFFER_SIZE - CODEC_SIZE - TTB_SIZE)
+
 #elif CONFIG_CPU == JZ4732 || CONFIG_CPU == JZ4760B
 /* fake 'iram' region occupies first 16k */
 #define DRAMORIG 0x80004000
@@ -182,6 +191,13 @@ SECTIONS
     .text :
     {
         *(.text*)
+#if !defined(USE_IRAM) && (CONFIG_CPU == S5L8740)
+        /* No IRAM on this target: assembly that hardcodes .icode still has
+           to land somewhere, so it goes in with the ordinary text. */
+        *(.icode)
+        *(.irodata)
+        *(.idata)
+#endif
 #ifdef CPU_ARM
         *(.glue_7)
         *(.glue_7t)
@@ -216,7 +232,7 @@ SECTIONS
     /DISCARD/ :
     {
         *(.eh_frame)
-#if !defined(USE_IRAM)
+#if !defined(USE_IRAM) && (CONFIG_CPU != S5L8740)
 		*(.icode)
         *(.irodata)
         *(.idata)
@@ -227,6 +243,13 @@ SECTIONS
         *(.rel.dyn)
 #endif
     }
+
+#if !defined(USE_IRAM) && (CONFIG_CPU == S5L8740)
+    .ibss_nodram (NOLOAD) :
+    {
+        *(.ibss)
+    } > PLUGIN_RAM
+#endif
 
     .bss (NOLOAD) :
     {
