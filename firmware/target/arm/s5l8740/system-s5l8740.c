@@ -21,6 +21,9 @@
 #include "system.h"
 #include "panic.h"
 #include "gpio-s5l8740.h"
+#include "clocking-s5l8740.h"
+#include "spi-s5l8740.h"
+#include "pl080.h"
 
 void usec_timer_init(void);
 
@@ -139,9 +142,18 @@ void system_init(void)
     VIC0ADDRESS = NULL;
     VIC1ADDRESS = NULL;
 
+    /*
+     * Clocks first: every block below needs its gate open, and the policy is
+     * ungate-all rather than per-driver gating while the clock tree is only
+     * partly RE'd.
+     */
+    clocking_init();
+
     usec_timer_init();
     gpio_init();
     eic_init();
+    pl080_init();
+    spi_init();
 }
 
 void system_reboot(void)
