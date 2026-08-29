@@ -22,6 +22,7 @@
 #include "storage.h"
 #include "nand-s5l8740.h"
 #include "ftl-s5l8740.h"
+#include <stdio.h>
 #include "lcd.h"
 #include "boot-beacon.h"
 
@@ -38,6 +39,9 @@
 
 static long last_disk_activity = -1;
 static bool storage_ready;
+
+/* Cleared until the volume is mounted; gates the boot-time read counter. */
+bool mount_done;
 
 int nand_init(void)
 {
@@ -199,6 +203,31 @@ int nand_read_sectors(IF_MD(int drive,) unsigned long start, int count,
 
     if (!storage_ready)
         return -1;
+
+    /*
+     * Live read counter during the mount.
+     *
+     * disk_mount_all() stops with no output and no way to tell a slow mount
+     * from a wedged one -- the two look identical from outside and need
+     * completely different work. A counter that keeps climbing says FAT is
+     * grinding through reads; one that freezes names the read it froze on.
+     *
+     * Every 2048 reads, because a repaint is a full 103,680-pixel frame.
+     * Temporary, and it comes out with the stage markers.
+     */
+    if (!mount_done) {
+        static unsigned reads;
+        char buf[40];
+
+        if ((++reads % 2048) == 0) {
+            snprintf(buf, sizeof(buf), "disk reads %u", reads);
+            lcd_clear_display();
+            lcd_putsxy(4, 4, "N7G stage");
+            lcd_putsxy(4, 20, "disk_mount_all");
+            lcd_putsxy(4, 36, buf);
+            lcd_update();
+        }
+    }
 
     last_disk_activity = current_tick;
 

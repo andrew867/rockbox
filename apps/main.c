@@ -808,6 +808,9 @@ static void init(void)
     pcm_init();
     dsp_init();
 
+#ifdef IPOD_NANO7G
+    { extern bool mount_done; mount_done = true; }
+#endif
     N7G_STAGE("settings_load");
     CHART(">settings_load");
     settings_load();

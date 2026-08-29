@@ -251,6 +251,38 @@
 /* Whimory BPB reports 4096-byte sectors, not the 2048 the nano4g assumes. */
 #define SECTOR_SIZE 4096
 
+/*
+ * This is a 4Kn device and the disk layer has to be told so.
+ *
+ * SECTOR_SIZE alone only sets a default. Without the four below, the generic
+ * disk and FAT code keeps its 512-byte assumptions in the places that matter:
+ * partition-table offsets, the logical/physical sector ratio, and the sector
+ * size advertised over USB. Reads then land at the wrong offsets, which is
+ * indistinguishable from a disk that will not mount.
+ *
+ * ipod6g -- the other Apple NAND-FTL target with 4096-byte sectors -- defines
+ * exactly these, and for exactly this reason. We had none of them.
+ */
+
+/* The device has larger sectors when accessed via USB. */
+#define MAX_VIRT_SECTOR_SIZE 4096
+
+/* With no valid partitions, advertise this as our sector size. */
+#define DEFAULT_VIRT_SECTOR_SIZE 4096
+
+/*
+ * Deliberately NOT MAX_PHYS_SECTOR_SIZE.
+ *
+ * ipod6g defines it, but together with MAX_VIRT_SECTOR_SIZE it makes disk.c
+ * call ata_set_phys_sector_mult() -- an ATA driver hook telling the driver its
+ * physical access size differs from the logical one. This is STORAGE_NAND and
+ * the FTL is natively 4096 either way, so there is no multiplier to
+ * communicate and no function to call.
+ */
+
+/* Support 512n and 4Kn drives. */
+#define MAX_VARIABLE_LOG_SECTOR 4096
+
 /* Offset ( in the firmware file's header ) to the file CRC */
 #define FIRMWARE_OFFSET_FILE_CRC 0
 
