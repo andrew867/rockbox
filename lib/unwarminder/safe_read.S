@@ -106,7 +106,32 @@ safe_read32_faulty_addr:
     bx      lr
 .size       safe_read32, . - safe_read32
 
-#if (CONFIG_PLATFORM & PLATFORM_NATIVE) && defined(CPU_ARM_CLASSIC)
+/*
+ * The fixup handler is needed by every ARM profile that can take a data
+ * abort, not just the classic one.
+ *
+ * safe_read8/16/32 fault ON PURPOSE -- that is the whole mechanism. The
+ * handler recognises the faulting PC as one of the three probe sites, sets
+ * was_aborted, and resumes at the following instruction so the probe can
+ * return false. Without it the probe is not "safe" at all: it is an
+ * unhandled abort.
+ *
+ * That matters most in the one place safe_read is actually used -- the stack
+ * unwinder, which runs from UIE while reporting an earlier crash. A probe
+ * that panics instead of returning false replaces the original fault's
+ * address and PC with the unwinder's own, so the crash report describes the
+ * crash reporter. On the nano7g that surfaced as a data abort on 0x64616f6c,
+ * which is the ASCII bytes "load" being walked as a pointer: a perfectly
+ * ordinary unwinder probe of a stack slot that is not one, reported as if it
+ * were the bug.
+ *
+ * ARMv7-A takes data aborts with exactly the same LR semantics as ARMv5/v6
+ * (LR_abt = faulting instruction + 8, resume via subs pc, lr, #4), so the
+ * code below is correct as written for the application profile. Only the
+ * gate needed widening.
+ */
+#if (CONFIG_PLATFORM & PLATFORM_NATIVE) && \
+    (defined(CPU_ARM_CLASSIC) || defined(CPU_ARM_APPLICATION))
 .section    .text.data_abort_handler
 .type       data_abort_handler, %function
 .global     data_abort_handler
