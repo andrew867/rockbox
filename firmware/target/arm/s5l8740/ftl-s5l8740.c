@@ -74,11 +74,23 @@
 #define DATA_PAGES_PER_SB   (NAND_PAGES_PER_BLOCK - 1)
 
 /*
- * Range table. 8192 ranges is roughly 200 KB and has been enough for a real
- * volume in the Linux work; a fuller device just means the tail of the map is
- * dropped, which ftl_get_stats() reports rather than hiding.
+ * Range table.
+ *
+ * 8192 was sized for the brute-force rebuild. The CXT snapshot seeds far more:
+ * the Linux driver measures 239525 extents from it on this unit, which coalesce
+ * down to a few thousand ranges -- but "a few thousand" is measured on one
+ * volume, and the failure when it does not fit is the nastiest kind. The map
+ * fills to exactly the ceiling and the rest of the device is simply absent:
+ * reads past it return unmapped, FAT cannot fetch directory blocks, and the
+ * mount comes up looking like a corrupt disk rather than a driver that stopped
+ * writing down where things are. Linux hit precisely that at 200000 nodes and
+ * lost 39512 extents to it.
+ *
+ * A range is 24 bytes, so this ceiling is about 780 KB of a 64 MB DRAM, and it
+ * is a ceiling rather than an allocation -- entries exist only for extents that
+ * exist. Headroom is close to free; silent truncation is not.
  */
-#define MAX_RANGES          8192
+#define MAX_RANGES          32768
 
 /* LBA values that mean "nothing here" rather than a real mapping. */
 #define LBA_BLANK           0xffffffffu
@@ -550,6 +562,320 @@ static void ftl_progress_paint(void)
     lcd_update_rect(0, 0, LCD_WIDTH, PROG_BAND_H);
 }
 
+/* ------------------------------------------------------------ SFTL CXT -- */
+
+/*
+ * The SFTL context is the FTL's own snapshot of the map, and reading it is
+ * enormously cheaper than reconstructing what it already recorded.
+ *
+ * Layout, from the Linux driver:
+ *
+ *   A CXT superblock is identified by the meta of its FIRST slot (page 0,
+ *   slot 0): type 0x1f, tag 1. Its weave orders it against the others; the
+ *   newest base is the one to trust.
+ *
+ *   Inside, each slot is one record, tagged in meta byte 1. Tag 4 carries L2V
+ *   extents, tag 255 ends the context. Every other tag is skipped.
+ *
+ *   An L2V record is a 4096-byte page of 8-byte pairs. The FIRST pair is a
+ *   header: LBA to resume at, and a span that must equal 0xfffffff0 -- a
+ *   marker, not a length. The rest are (vba, span) and the LBA advances by
+ *   each span, so the records describe one continuously increasing run of the
+ *   logical space. That is why records must be consecutive and why a gap is
+ *   treated as corruption rather than skipped.
+ *
+ * Two things this must NOT do, both learned from the Linux driver:
+ *
+ *   VBAs that live inside a CXT superblock hold context records, not user
+ *   data. They must never enter the map.
+ *
+ *   The snapshot is not the present. Superblocks written after it carry a
+ *   higher weave and have to be replayed on top, or the mount comes up
+ *   correct-but-stale and the newest files are missing. That replay is the
+ *   whole reason the weave is tracked here.
+ */
+#define CXT_TAG_BASE        1
+#define CXT_TAG_L2V         4
+#define CXT_TAG_END         255
+#define CXT_CONTIG_SPAN     0xfffffff0u
+
+#define CXT_MAX_SB          32
+
+/*
+ * How far down from the top of the device to look for a context.
+ *
+ * The CXT lives in the high blocks -- around 1960 of 2088 on N31 -- so a
+ * targeted hunt finds it in a few hundred reads instead of sweeping the whole
+ * device to stumble across it. 256 blocks is roughly double the observed
+ * offset, which is margin without being a second full scan.
+ */
+#define CXT_HUNT_BLOCKS     256
+
+/* Every VBA on the device; anything at or above this is not a real address. */
+#define VBA_LIMIT           ((uint32_t)(NAND_MAX_CE * NAND_MAX_CAU) * \
+                             NAND_BLOCKS_PER_CAU * NAND_PAGES_PER_BLOCK * \
+                             NAND_SLOTS_PER_PAGE)
+
+struct cxt_sb_ref {
+    uint16_t block;
+    uint8_t  ce;
+    uint8_t  cau;
+};
+
+static struct cxt_sb_ref cxt_sbs[CXT_MAX_SB];   /* all CXT superblocks */
+static unsigned cxt_sb_count;
+
+static struct cxt_sb_ref cxt_bases[CXT_MAX_SB]; /* those tagged BASE */
+static uint64_t cxt_base_weaves[CXT_MAX_SB];
+static unsigned cxt_base_count;
+
+static bool cxt_loaded;
+static uint64_t cxt_weave;          /* weave of the loaded snapshot */
+static uint32_t cxt_next_lba;
+static bool cxt_lba_valid;
+
+static uint32_t rd32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/*
+ * VBAs inside a CXT superblock are context records, not user data.
+ * Linear scan: cxt_sb_count is a handful, and this runs once per extent.
+ */
+static bool vba_is_cxt(uint32_t vba)
+{
+    uint8_t ce, cau, page, slot;
+    uint16_t block;
+    unsigned i;
+
+    vba_to_phys(vba, &ce, &cau, &block, &page, &slot);
+
+    for (i = 0; i < cxt_sb_count; i++) {
+        if (cxt_sbs[i].ce == ce && cxt_sbs[i].cau == cau &&
+            cxt_sbs[i].block == block)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * Append one CXT extent.
+ *
+ * Deliberately NOT map_add(). CXT records arrive in strictly increasing LBA
+ * order -- the header's continuity check is what guarantees it -- and they are
+ * loaded into an empty table before anything else. So each extent either
+ * extends the last range or becomes the next one: O(1), no search, no memmove.
+ *
+ * map_add() does a sorted insert with a memmove per entry, which is right for
+ * the scattered writes the BTOC replay produces and quadratic for a quarter of
+ * a million ordered ones. Using it here would make loading the fast path
+ * slower than the scan it replaces.
+ */
+static void cxt_append(uint32_t lba, uint32_t span, uint32_t vba, uint64_t weave)
+{
+    if (!span || lba_is_special(lba))
+        return;
+
+    if (range_count) {
+        struct ftl_range *prev = &ranges[range_count - 1];
+
+        if (prev->start + prev->len == lba &&
+            prev->vba + prev->len == vba &&
+            prev->weave == weave) {
+            prev->len += span;
+            stat_mapped += span;
+            return;
+        }
+    }
+
+    if (range_count >= MAX_RANGES) {
+        ranges_overflowed = true;
+        return;
+    }
+
+    ranges[range_count].start = lba;
+    ranges[range_count].len = span;
+    ranges[range_count].vba = vba;
+    ranges[range_count].weave = weave;
+    range_count++;
+    stat_mapped += span;
+}
+
+/* One tag-4 record: a header pair followed by (vba, span) pairs. */
+static int cxt_load_l2v(const uint8_t *d, uint64_t weave)
+{
+    uint32_t lba, span, vba;
+    unsigned i, n = NAND_SLOT_DATA / 8;
+
+    lba = rd32le(d);
+    span = rd32le(d + 4);
+
+    if (span == 0xffffffffu)
+        return 0;               /* unwritten record, not an error */
+    if (span != CXT_CONTIG_SPAN)
+        return -1;              /* not the layout we understand */
+
+    /*
+     * The records describe one continuous run of the logical space. A break
+     * means we have misparsed or the context is damaged, and continuing would
+     * silently attach real VBAs to the wrong LBAs -- far worse than falling
+     * back to the scan.
+     */
+    if (cxt_lba_valid && lba != cxt_next_lba)
+        return -1;
+    cxt_lba_valid = true;
+
+    for (i = 1; i < n; i++) {
+        vba  = rd32le(d + 8 * i);
+        span = rd32le(d + 8 * i + 4);
+
+        if (vba == 0xffffffffu || !span)
+            break;              /* end of this record */
+
+        if (vba < VBA_LIMIT && !vba_is_cxt(vba))
+            cxt_append(lba, span, vba, weave);
+
+        lba += span;
+    }
+
+    cxt_next_lba = lba;
+    return 0;
+}
+
+/* Walk one CXT superblock in VBA order until the END tag. */
+static int cxt_load_sb(unsigned ce, unsigned cau, unsigned block,
+                       uint64_t weave)
+{
+    unsigned pg, s;
+
+    cxt_lba_valid = false;
+    cxt_next_lba = 0;
+
+    for (pg = 0; pg < NAND_PAGES_PER_BLOCK; pg++) {
+        if (nand_cs_phys_read(ce, cau, block, pg, &scratch))
+            return -1;
+
+        if ((pg % 8) == 0) {
+            prog_cur = pg;
+            ftl_progress_paint();
+        }
+
+        for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
+            const uint8_t *m = scratch.meta_raw[s];
+
+            if (m[0] != NAND_META_TYPE_SFTL_CXT)
+                continue;
+            if (m[1] == CXT_TAG_END)
+                return 0;
+            if (m[1] != CXT_TAG_L2V)
+                continue;
+
+            if (cxt_load_l2v(scratch.data[s], weave))
+                return -1;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Find the context, newest first, and load it.
+ *
+ * Reads page 0 of each superblock in the top CXT_HUNT_BLOCKS blocks. That is
+ * about a thousand reads against the 8352 a full sweep costs, and it is the
+ * only place the context can be.
+ */
+static bool cxt_hunt_and_load(void)
+{
+    unsigned block, ce, cau, i, best;
+    unsigned lo = (SB_COUNT > CXT_HUNT_BLOCKS) ? SB_COUNT - CXT_HUNT_BLOCKS : 0;
+
+    cxt_sb_count = cxt_base_count = 0;
+    cxt_loaded = false;
+    cxt_weave = 0;
+
+    prog_phase = "cxt find";
+    prog_total = (SB_COUNT - lo) * BANKS;
+    prog_cur = 0;
+    prog_want = 0;
+
+    for (block = SB_COUNT; block-- > lo; ) {
+        for (ce = 0; ce < NAND_MAX_CE; ce++) {
+            for (cau = 0; cau < NAND_MAX_CAU; cau++) {
+                const uint8_t *m;
+
+                prog_cur++;
+                if ((prog_cur % PROG_EVERY) == 0)
+                    ftl_progress_paint();
+
+                if (nand_cs_phys_read(ce, cau, block, 0, &scratch))
+                    continue;
+
+                m = scratch.meta_raw[0];
+                if (m[0] != NAND_META_TYPE_SFTL_CXT)
+                    continue;
+
+                if (cxt_sb_count < CXT_MAX_SB) {
+                    cxt_sbs[cxt_sb_count].block = (uint16_t)block;
+                    cxt_sbs[cxt_sb_count].ce    = (uint8_t)ce;
+                    cxt_sbs[cxt_sb_count].cau   = (uint8_t)cau;
+                    cxt_sb_count++;
+                }
+
+                if (m[1] == CXT_TAG_BASE && cxt_base_count < CXT_MAX_SB) {
+                    cxt_bases[cxt_base_count].block = (uint16_t)block;
+                    cxt_bases[cxt_base_count].ce    = (uint8_t)ce;
+                    cxt_bases[cxt_base_count].cau   = (uint8_t)cau;
+                    cxt_base_weaves[cxt_base_count] = scratch.meta[0].weave;
+                    cxt_base_count++;
+                }
+            }
+        }
+    }
+
+    /* Newest base wins; older ones are previous snapshots. */
+    while (cxt_base_count) {
+        best = 0;
+        for (i = 1; i < cxt_base_count; i++) {
+            if (cxt_base_weaves[i] > cxt_base_weaves[best])
+                best = i;
+        }
+
+        prog_phase = "cxt load";
+        prog_total = NAND_PAGES_PER_BLOCK;
+        prog_cur = 0;
+        ftl_progress_paint();
+
+        range_count = 0;
+        stat_mapped = 0;
+        ranges_overflowed = false;
+
+        if (cxt_load_sb(cxt_bases[best].ce, cxt_bases[best].cau,
+                        cxt_bases[best].block, cxt_base_weaves[best]) == 0 &&
+            range_count) {
+            cxt_weave = cxt_base_weaves[best];
+            cxt_loaded = true;
+            return true;
+        }
+
+        /*
+         * That base did not parse. Discard whatever it produced -- a partial
+         * context is not a map -- and try the next newest.
+         */
+        range_count = 0;
+        stat_mapped = 0;
+        ranges_overflowed = false;
+
+        cxt_bases[best] = cxt_bases[cxt_base_count - 1];
+        cxt_base_weaves[best] = cxt_base_weaves[cxt_base_count - 1];
+        cxt_base_count--;
+    }
+
+    return false;
+}
+
 /*
  * How many reads may fail back-to-back, from a cold start, before we accept
  * that the NAND is not talking to us.
@@ -583,6 +909,12 @@ int ftl_recover(void)
     open_sb_count = 0;
     open_sb_overflow = false;
     ftl_is_ready = false;
+
+    /*
+     * Try the context first. When it loads, the map is already built and the
+     * sweep below only has to find what was written AFTER the snapshot.
+     */
+    cxt_hunt_and_load();
 
     prog_phase = "scan";
     prog_total = SB_COUNT * BANKS;
@@ -632,6 +964,21 @@ int ftl_recover(void)
 
                 if (is_btoc) {
                     stat_sbs_closed++;
+
+                    /*
+                     * With a context loaded, superblocks older than the
+                     * snapshot are already in the map -- replaying them costs
+                     * a full BTOC parse each to produce entries map_add()
+                     * would discard as stale anyway.
+                     *
+                     * Newer ones are exactly what the context cannot know
+                     * about, so they still get replayed. That is what keeps
+                     * the most recent writes present rather than mounting a
+                     * correct-but-stale snapshot.
+                     */
+                    if (cxt_loaded && weave <= cxt_weave)
+                        continue;
+
                     btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
                                 ce, cau, block, weave);
                 } else {
