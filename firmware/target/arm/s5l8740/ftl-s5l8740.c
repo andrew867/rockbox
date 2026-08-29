@@ -269,35 +269,63 @@ static void ranges_coalesce(void)
 /* -------------------------------------------------------- physical map -- */
 
 /*
- * A VBA is a flat ordinal over every data slot on the device, so one number
- * carries bank, block, page and slot. Packing it this way keeps the range
- * table small -- ranges stay contiguous across page boundaries, which they
- * would not if each field were stored separately.
+ * A VBA is a flat ordinal over every data slot on the device.
+ *
+ * The ORDER of the fields is not a free choice, and getting it wrong is what
+ * produced a perfectly built map that FAT could not read: 579124 LBAs across
+ * 1692 ranges, and no boot sector anywhere in it.
+ *
+ * This used to be bank-major -- every (ce, cau, block) triple got its own
+ * superblock index, so the flat ordinal ran block-by-block through all of
+ * plane 0, then all of plane 1, and so on. That is a perfectly reasonable
+ * layout and it is not the one Apple uses.
+ *
+ * Apple treats a superblock as the SAME virtual block across every (ce, cau)
+ * plane, and puts the plane index between the page and the slot:
+ *
+ *   vba = vblock * (pages_per_sb * planes * slots)
+ *       + page   * (planes * slots)
+ *       + plane  * slots
+ *       + slot
+ *
+ * The CXT records its extents in that space. Under the old layout a CXT VBA
+ * landed on an unrelated page, so every extent pointed somewhere real but
+ * wrong -- which is exactly a full map with no recognisable BPB in it.
+ *
+ * Matching Apple's layout rather than translating on the way in is deliberate.
+ * A translation would be correct but would shatter the map: consecutive CXT
+ * VBAs stay contiguous only within one 4-slot group, because the next group
+ * belongs to a different plane, so 579124 mapped LBAs would become ~145000
+ * ranges instead of 1692. Adopting the layout keeps every run contiguous and
+ * costs nothing -- this ordinal is ours to define, and only ever has to agree
+ * with vba_to_phys() below.
  */
+#define VBA_PER_PAGE    (NAND_MAX_CE * NAND_MAX_CAU * NAND_SLOTS_PER_PAGE)
+#define VBA_PER_SB      (NAND_PAGES_PER_BLOCK * VBA_PER_PAGE)
+
 static uint32_t phys_to_vba(unsigned ce, unsigned cau, unsigned block,
                             unsigned page, unsigned slot)
 {
-    uint32_t bank = ce * NAND_MAX_CAU + cau;
-    uint32_t page_i = block * NAND_PAGES_PER_BLOCK + page;
+    uint32_t plane = ce * NAND_MAX_CAU + cau;
 
-    return ((bank * NAND_BLOCKS_PER_CAU * NAND_PAGES_PER_BLOCK + page_i)
-            * NAND_SLOTS_PER_PAGE) + (slot & 3);
+    return block * VBA_PER_SB
+         + page  * VBA_PER_PAGE
+         + plane * NAND_SLOTS_PER_PAGE
+         + (slot & 3);
 }
 
 static void vba_to_phys(uint32_t vba, uint8_t *ce, uint8_t *cau,
                         uint16_t *block, uint8_t *page, uint8_t *slot)
 {
-    uint32_t slot_i = vba % NAND_SLOTS_PER_PAGE;
-    uint32_t page_i = vba / NAND_SLOTS_PER_PAGE;
-    uint32_t pages_per_bank = NAND_BLOCKS_PER_CAU * NAND_PAGES_PER_BLOCK;
-    uint32_t bank = page_i / pages_per_bank;
-    uint32_t rem = page_i % pages_per_bank;
+    uint32_t vblock = vba / VBA_PER_SB;
+    uint32_t rem    = vba % VBA_PER_SB;
+    uint32_t plane  = (rem % VBA_PER_PAGE) / NAND_SLOTS_PER_PAGE;
 
-    *slot = (uint8_t)slot_i;
-    *page = (uint8_t)(rem % NAND_PAGES_PER_BLOCK);
-    *block = (uint16_t)(rem / NAND_PAGES_PER_BLOCK);
-    *cau = (uint8_t)(bank % NAND_MAX_CAU);
-    *ce = (uint8_t)(bank / NAND_MAX_CAU);
+    *block = (uint16_t)vblock;
+    *page  = (uint8_t)(rem / VBA_PER_PAGE);
+    *cau   = (uint8_t)(plane % NAND_MAX_CAU);
+    *ce    = (uint8_t)(plane / NAND_MAX_CAU);
+    *slot  = (uint8_t)(rem % NAND_SLOTS_PER_PAGE);
 }
 
 /* ---------------------------------------------------------------- BTOC -- */
@@ -584,9 +612,7 @@ static void ftl_progress_paint(void)
 #define SB_LIST_MAX         (SB_COUNT * BANKS)
 
 /* Every VBA on the device; anything at or above this is not a real address. */
-#define VBA_LIMIT           ((uint32_t)(NAND_MAX_CE * NAND_MAX_CAU) * \
-                             NAND_BLOCKS_PER_CAU * NAND_PAGES_PER_BLOCK * \
-                             NAND_SLOTS_PER_PAGE)
+#define VBA_LIMIT           ((uint32_t)NAND_BLOCKS_PER_CAU * VBA_PER_SB)
 
 struct cxt_sb_ref {
     uint16_t block;
