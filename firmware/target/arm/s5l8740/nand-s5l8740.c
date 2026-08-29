@@ -346,6 +346,73 @@ static int fmss_dma_page_read(unsigned ce, uint32_t addr,
     return ret;
 }
 
+/*
+ * Cheap "is this superblock free" probe.
+ *
+ * The classify sweep reads page 0 of all 8352 superblocks and, for the great
+ * majority of them, learns one bit: empty. It was paying for a full four-record
+ * page -- 4 x (4096 + 16) = 16448 bytes -- to obtain it. Across the sweep that
+ * is roughly 130 MB of NAND transfer to answer a question worth a few hundred
+ * kilobytes, and on a device where most blocks are free it dominates mount
+ * time.
+ *
+ * The erase test only ever looks at slot 0: its meta, plus the head of its
+ * data. fmss_dma_page_read() already took a (slot, span) pair and was simply
+ * always called with (0, 4). A span of 1 moves 4112 bytes -- a quarter -- and
+ * answers the common case outright.
+ *
+ * Two deliberate limits, because this is the storage path:
+ *
+ *   It returns a verdict, not data. Slots 1-3 are genuinely not read, so
+ *   handing back a struct nand_cs_page would be handing back three-quarters
+ *   stale buffer. Nothing can mistake a bool for a cheap general read.
+ *
+ *   "Not conclusively empty" is the only other answer it gives. A block that
+ *   fails this probe is re-read in full, because classification needs every
+ *   slot's meta -- a context superblock can be identified by ANY slot, so
+ *   deciding that from slot 0 alone would silently misfile it. The saving is
+ *   confined to blocks where one record is genuinely the whole answer.
+ */
+bool nand_cs_probe_empty(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page)
+{
+    const uint8_t *d, *m;
+    uint32_t addr;
+    unsigned i;
+
+    if (!nand_ready)
+        return false;
+    if (ce >= NAND_MAX_CE || cau >= NAND_MAX_CAU ||
+        block >= NAND_BLOCKS_PER_CAU || page > NAND_BTOC_PAGE)
+        return false;
+
+    addr = nand_ppn_addr(cau, block, page, 0);
+
+    if (fmss_dma_page_read(ce, addr, 0, 1)) {
+        pages_since_reset++;
+        return false;           /* read failed: let the full path decide */
+    }
+    pages_since_reset++;
+
+    m = (const uint8_t *)UNCACHED(nand_spare);
+    for (i = 0; i < NAND_SLOT_META; i++) {
+        if (m[i] != 0x00 && m[i] != 0xff)
+            return false;
+    }
+
+    /*
+     * Head of the data only. An erased NAND page is uniform, so 64 bytes is
+     * as conclusive as 4096 and costs nothing extra -- the transfer already
+     * happened; this is just how much of it we bother to look at.
+     */
+    d = (const uint8_t *)UNCACHED(nand_data);
+    for (i = 0; i < 64; i++) {
+        if (d[i] != 0x00 && d[i] != 0xff)
+            return false;
+    }
+
+    return true;
+}
+
 int nand_cs_phys_read(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
                       struct nand_cs_page *out)
 {

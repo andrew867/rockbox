@@ -92,6 +92,14 @@ int  nand_hw_reset(void);
 int nand_cs_phys_read(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
                       struct nand_cs_page *out);
 
+/*
+ * True only if the page is conclusively erased. Reads one record instead of
+ * four, so it costs a quarter of a full page read -- but it returns a verdict
+ * rather than data, and anything it cannot settle must be re-read in full.
+ */
+bool nand_cs_probe_empty(uint8_t ce, uint8_t cau, uint16_t block,
+                         uint8_t page);
+
 void nand_meta_decode(const uint8_t *m16, struct nand_meta *out);
 
 static inline bool nand_meta_is_data(const struct nand_meta *m)

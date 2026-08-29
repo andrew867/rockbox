@@ -109,38 +109,11 @@ static uint32_t disk_sector_count;
 static unsigned stat_sbs_closed;
 static unsigned stat_sbs_open;
 static unsigned stat_mapped;
+static unsigned stat_probe_empty;
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
 static unsigned prog_found, prog_want;
-
-/*
- * Open superblocks found during pass one.
- *
- * Pass one already visits every superblock and already decides which ones are
- * open -- that is the entire purpose of the sweep. It then threw the
- * coordinates away, and pass two re-read all 8352 BTOC pages to work out the
- * same answer a second time. Two identical full sweeps of the same NAND to
- * learn a fact the first one had in hand.
- *
- * Writing down four bytes per hit removes the second sweep completely. Open
- * superblocks are the ones currently being written, so there are normally a
- * handful; 512 is far above any plausible count and costs 2 KB.
- *
- * If it ever does overflow, pass two falls back to the old full sweep rather
- * than silently rebuilding an incomplete map. Slow and correct beats fast and
- * missing half the volume.
- */
-#define OPEN_SB_MAX     512
-
-static struct open_sb_ref {
-    uint16_t block;
-    uint8_t  ce;
-    uint8_t  cau;
-} open_sbs[OPEN_SB_MAX];
-
-static unsigned open_sb_count;
-static bool open_sb_overflow;
 
 /* One page's worth of scratch, reused throughout. */
 static struct nand_cs_page scratch;
@@ -602,14 +575,13 @@ static void ftl_progress_paint(void)
 #define CXT_MAX_SB          32
 
 /*
- * How far down from the top of the device to look for a context.
+ * Written superblocks found by the page-0 sweep.
  *
- * The CXT lives in the high blocks -- around 1960 of 2088 on N31 -- so a
- * targeted hunt finds it in a few hundred reads instead of sweeping the whole
- * device to stumble across it. 256 blocks is roughly double the observed
- * offset, which is margin without being a second full scan.
+ * SB_COUNT * BANKS is 8352 entries at 16 bytes, so ~134 KB of a 64 MB DRAM.
+ * That buys the whole restructure below: the sweep records what it saw
+ * instead of throwing it away and re-reading the device to recover it.
  */
-#define CXT_HUNT_BLOCKS     256
+#define SB_LIST_MAX         (SB_COUNT * BANKS)
 
 /* Every VBA on the device; anything at or above this is not a real address. */
 #define VBA_LIMIT           ((uint32_t)(NAND_MAX_CE * NAND_MAX_CAU) * \
@@ -621,6 +593,17 @@ struct cxt_sb_ref {
     uint8_t  ce;
     uint8_t  cau;
 };
+
+/* One written superblock, with the weave from its first slot. */
+struct sb_ent {
+    uint64_t weave;
+    uint16_t block;
+    uint8_t  ce;
+    uint8_t  cau;
+};
+
+static struct sb_ent sb_list[SB_LIST_MAX];
+static unsigned sb_list_count;
 
 static struct cxt_sb_ref cxt_sbs[CXT_MAX_SB];   /* all CXT superblocks */
 static unsigned cxt_sb_count;
@@ -781,61 +764,142 @@ static int cxt_load_sb(unsigned ce, unsigned cau, unsigned block,
 }
 
 /*
- * Find the context, newest first, and load it.
+ * How many reads may fail back-to-back, from a cold start, before we accept
+ * that the NAND is not talking to us.
  *
- * Reads page 0 of each superblock in the top CXT_HUNT_BLOCKS blocks. That is
- * about a thousand reads against the 8352 a full sweep costs, and it is the
- * only place the context can be.
+ * A device with data on it answers its very first BTOC read. Blank
+ * superblocks return a page and are classified as free -- they do not fail.
+ * So a long unbroken run of hard failures before ANY success does not mean
+ * "an empty device", it means the controller is not responding, and every
+ * further attempt buys another 200 ms of the same answer.
+ *
+ * 64 is generous enough to ride out a bad region at the start of the scan and
+ * cheap enough to bail in about thirteen seconds instead of half an hour.
+ * Once a single read has succeeded the budget is retired entirely: from that
+ * point failures are ordinary bad blocks and must not abort a real mount.
  */
-static bool cxt_hunt_and_load(void)
+#define COLD_FAIL_LIMIT 64
+
+/*
+ * Sweep page 0 of every superblock.
+ *
+ * ONE read per superblock, and it answers three questions at once: is this
+ * block free, is it a context, and -- if it is neither -- what is its weave.
+ * The weave is the whole point, because it decides which superblocks the
+ * context has already accounted for and which still need replaying.
+ *
+ * The previous version hunted for the context only in the top 256 blocks, on
+ * the strength of a Linux comment putting it around block 1960. On this device
+ * it usually is not there, and widening that hunt to the whole device would
+ * simply have added a second full sweep on top of the classify sweep -- page 0
+ * everywhere, then page 127 everywhere, ~16700 reads.
+ *
+ * So the two are merged. This sweep is the only unconditional pass over the
+ * device. Page 127 is then read for the small set of superblocks the context
+ * does not already cover, rather than for all 8352 of them.
+ *
+ * Free blocks cost exactly one read and are never looked at again -- the old
+ * arrangement read their BTOC page too, to learn what page 0 had already said.
+ */
+static bool sb_sweep_page0(void)
 {
-    unsigned block, ce, cau, i, best;
-    unsigned lo = (SB_COUNT > CXT_HUNT_BLOCKS) ? SB_COUNT - CXT_HUNT_BLOCKS : 0;
+    unsigned block, ce, cau, n = 0;
+    unsigned cold_fails = 0;
+    bool any_ok = false;
 
     cxt_sb_count = cxt_base_count = 0;
-    cxt_loaded = false;
-    cxt_weave = 0;
+    sb_list_count = 0;
+    stat_probe_empty = 0;
 
-    prog_phase = "cxt find";
-    prog_total = (SB_COUNT - lo) * BANKS;
+    prog_phase = "scan";
+    prog_total = SB_COUNT * BANKS;
     prog_cur = 0;
     prog_want = 0;
 
-    for (block = SB_COUNT; block-- > lo; ) {
+    for (block = 0; block < SB_COUNT; block++) {
         for (ce = 0; ce < NAND_MAX_CE; ce++) {
             for (cau = 0; cau < NAND_MAX_CAU; cau++) {
                 const uint8_t *m;
 
-                prog_cur++;
-                if ((prog_cur % PROG_EVERY) == 0)
+                prog_cur = ++n;
+                if ((n % PROG_EVERY) == 0)
                     ftl_progress_paint();
 
-                if (nand_cs_phys_read(ce, cau, block, 0, &scratch))
+                /*
+                 * Settle the common case at a quarter of the transfer. Most
+                 * superblocks are free, and a free one has nothing further to
+                 * say -- no weave, no context, no classification.
+                 */
+                if (nand_cs_probe_empty(ce, cau, block, 0)) {
+                    any_ok = true;
+                    stat_probe_empty++;
                     continue;
-
-                m = scratch.meta_raw[0];
-                if (m[0] != NAND_META_TYPE_SFTL_CXT)
-                    continue;
-
-                if (cxt_sb_count < CXT_MAX_SB) {
-                    cxt_sbs[cxt_sb_count].block = (uint16_t)block;
-                    cxt_sbs[cxt_sb_count].ce    = (uint8_t)ce;
-                    cxt_sbs[cxt_sb_count].cau   = (uint8_t)cau;
-                    cxt_sb_count++;
                 }
 
-                if (m[1] == CXT_TAG_BASE && cxt_base_count < CXT_MAX_SB) {
-                    cxt_bases[cxt_base_count].block = (uint16_t)block;
-                    cxt_bases[cxt_base_count].ce    = (uint8_t)ce;
-                    cxt_bases[cxt_base_count].cau   = (uint8_t)cau;
-                    cxt_base_weaves[cxt_base_count] = scratch.meta[0].weave;
-                    cxt_base_count++;
+                if (nand_cs_phys_read(ce, cau, block, 0, &scratch)) {
+                    /*
+                     * A device with data answers its first read. Blank
+                     * superblocks return a page and are classified as free --
+                     * they do not fail. So an unbroken run of hard failures
+                     * before ANY success means the controller is not talking,
+                     * and every further attempt buys another timeout of the
+                     * same answer. 8352 of those is minutes of nothing.
+                     *
+                     * Retired permanently after the first success: from then
+                     * on failures are ordinary bad blocks and must not abort a
+                     * real mount.
+                     */
+                    if (!any_ok && ++cold_fails >= COLD_FAIL_LIMIT)
+                        return false;
+                    continue;
+                }
+
+                any_ok = true;
+                m = scratch.meta_raw[0];
+
+                if (m[0] == NAND_META_TYPE_SFTL_CXT) {
+                    if (cxt_sb_count < CXT_MAX_SB) {
+                        cxt_sbs[cxt_sb_count].block = (uint16_t)block;
+                        cxt_sbs[cxt_sb_count].ce    = (uint8_t)ce;
+                        cxt_sbs[cxt_sb_count].cau   = (uint8_t)cau;
+                        cxt_sb_count++;
+                    }
+                    if (m[1] == CXT_TAG_BASE && cxt_base_count < CXT_MAX_SB) {
+                        cxt_bases[cxt_base_count].block = (uint16_t)block;
+                        cxt_bases[cxt_base_count].ce    = (uint8_t)ce;
+                        cxt_bases[cxt_base_count].cau   = (uint8_t)cau;
+                        cxt_base_weaves[cxt_base_count] =
+                            scratch.meta[0].weave;
+                        cxt_base_count++;
+                    }
+                    continue;
+                }
+
+                if (page_blank(&scratch))
+                    continue;           /* free superblock */
+
+                if (sb_list_count < SB_LIST_MAX) {
+                    sb_list[sb_list_count].block = (uint16_t)block;
+                    sb_list[sb_list_count].ce    = (uint8_t)ce;
+                    sb_list[sb_list_count].cau   = (uint8_t)cau;
+                    sb_list[sb_list_count].weave = scratch.meta[0].weave;
+                    sb_list_count++;
                 }
             }
         }
     }
 
-    /* Newest base wins; older ones are previous snapshots. */
+    return true;
+}
+
+/* Load the newest context that parses. */
+static bool cxt_load_newest(void)
+{
+    unsigned i, best;
+
+    cxt_loaded = false;
+    cxt_weave = 0;
+
     while (cxt_base_count) {
         best = 0;
         for (i = 1; i < cxt_base_count; i++) {
@@ -876,29 +940,10 @@ static bool cxt_hunt_and_load(void)
     return false;
 }
 
-/*
- * How many reads may fail back-to-back, from a cold start, before we accept
- * that the NAND is not talking to us.
- *
- * A device with data on it answers its very first BTOC read. Blank
- * superblocks return a page and are classified as free -- they do not fail.
- * So a long unbroken run of hard failures before ANY success does not mean
- * "an empty device", it means the controller is not responding, and every
- * further attempt buys another 200 ms of the same answer.
- *
- * 64 is generous enough to ride out a bad region at the start of the scan and
- * cheap enough to bail in about thirteen seconds instead of half an hour.
- * Once a single read has succeeded the budget is retired entirely: from that
- * point failures are ordinary bad blocks and must not abort a real mount.
- */
-#define COLD_FAIL_LIMIT 64
 
 int ftl_recover(void)
 {
-    unsigned ce, cau, block;
-    unsigned scanned = 0;
-    unsigned cold_fails = 0;
-    bool any_read_ok = false;
+    unsigned i;
 
     if (!nand_hw_present())
         return -1;
@@ -906,190 +951,87 @@ int ftl_recover(void)
     range_count = 0;
     ranges_overflowed = false;
     stat_sbs_closed = stat_sbs_open = stat_mapped = 0;
-    open_sb_count = 0;
-    open_sb_overflow = false;
     ftl_is_ready = false;
 
     /*
-     * Try the context first. When it loads, the map is already built and the
-     * sweep below only has to find what was written AFTER the snapshot.
-     */
-    cxt_hunt_and_load();
-
-    prog_phase = "scan";
-    prog_total = SB_COUNT * BANKS;
-    prog_cur = 0;
-
-    /*
-     * Pass one: classify every superblock from its last page.
+     * One pass over the device, then only what the context cannot account for.
      *
-     * Reading only the BTOC page rather than every page is what makes mount
-     * take seconds instead of quarter of an hour -- a full walk of this
-     * device is over a million page reads.
+     * This used to be two full sweeps -- classify every superblock from its
+     * BTOC page, then sweep the whole device AGAIN to re-find the open ones --
+     * and the CXT hunt would have made it three. Page 0 carries everything
+     * needed to decide what to do with a superblock, so it is read once and
+     * the answers are kept.
      */
-    for (block = 0; block < SB_COUNT; block++) {
-        for (ce = 0; ce < NAND_MAX_CE; ce++) {
-            for (cau = 0; cau < NAND_MAX_CAU; cau++) {
-                unsigned s;
-                bool is_btoc = false;
-                uint64_t weave = 0;
-
-                prog_cur = ++scanned;
-                if ((scanned % PROG_EVERY) == 0)
-                    ftl_progress_paint();
-
-                if (nand_cs_phys_read(ce, cau, block, NAND_BTOC_PAGE,
-                                      &scratch)) {
-                    if (!any_read_ok && ++cold_fails >= COLD_FAIL_LIMIT) {
-                        prog_phase = "no answer";
-                        ftl_progress_paint();
-                        return -1;
-                    }
-                    continue;
-                }
-
-                any_read_ok = true;
-
-                if (page_blank(&scratch))
-                    continue;   /* free superblock */
-
-                for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
-                    if (scratch.meta[s].valid &&
-                        scratch.meta[s].type == NAND_META_TYPE_BTOC) {
-                        is_btoc = true;
-                        weave = scratch.meta[s].weave;
-                        break;
-                    }
-                }
-
-                if (is_btoc) {
-                    stat_sbs_closed++;
-
-                    /*
-                     * With a context loaded, superblocks older than the
-                     * snapshot are already in the map -- replaying them costs
-                     * a full BTOC parse each to produce entries map_add()
-                     * would discard as stale anyway.
-                     *
-                     * Newer ones are exactly what the context cannot know
-                     * about, so they still get replayed. That is what keeps
-                     * the most recent writes present rather than mounting a
-                     * correct-but-stale snapshot.
-                     */
-                    if (cxt_loaded && weave <= cxt_weave)
-                        continue;
-
-                    btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
-                                ce, cau, block, weave);
-                } else {
-                    /*
-                     * Written but no BTOC: still open. The page-by-page
-                     * rebuild is deferred to pass two so the cheap
-                     * classification finishes first, but the COORDINATES are
-                     * recorded here -- they are already in hand, and pass two
-                     * used to re-read the whole device to recover them.
-                     */
-                    stat_sbs_open++;
-
-                    if (open_sb_count < OPEN_SB_MAX) {
-                        open_sbs[open_sb_count].block = (uint16_t)block;
-                        open_sbs[open_sb_count].ce    = (uint8_t)ce;
-                        open_sbs[open_sb_count].cau   = (uint8_t)cau;
-                        open_sb_count++;
-                    } else {
-                        open_sb_overflow = true;
-                    }
-                }
-            }
-        }
+    if (!sb_sweep_page0()) {
+        prog_phase = "no answer";
+        ftl_progress_paint();
+        return -1;
     }
 
-    /* Pass two: walk the open superblocks page by page. */
-    prog_phase = "open";
     /*
-     * Pass two counts the SWEEP, not the findings.
-     *
-     * This used to set prog_total = stat_sbs_open and advance prog_cur only
-     * when an open superblock was found. That measures the wrong thing: the
-     * work here is a second full 8352-block re-read of every BTOC page, and
-     * open superblocks are rare, so the number sat still for minutes at a
-     * time while the device was busy. On screen that is indistinguishable
-     * from a hang -- which is exactly how it was reported, right after pass
-     * one had finished cleanly at 8320/8352.
-     *
-     * A progress counter has one job: move when work is happening. The
-     * open-superblock tally is still worth seeing, so it gets its own line
-     * rather than being smuggled into the main one.
+     * The context is the FTL's own map. When it loads, most of the work below
+     * simply does not happen.
      */
+    cxt_load_newest();
+
+    /*
+     * Replay whatever the context does not already cover.
+     *
+     * With a context loaded this is only the superblocks written AFTER the
+     * snapshot -- normally a handful, and exactly where the newest files live.
+     * Older ones are skipped without even reading their BTOC page: the context
+     * already has them, and map_add() would discard the results as stale.
+     *
+     * With no context it degrades to the old behaviour, reading the BTOC page
+     * of every written superblock. Slower, but the same answer.
+     */
+    prog_phase = cxt_loaded ? "replay" : "btoc";
+    prog_total = sb_list_count;
     prog_cur = 0;
-    prog_total = SB_COUNT * BANKS;
     prog_found = 0;
-    prog_want = stat_sbs_open;
+    prog_want = 0;
 
-    prog_phase = "btoc";
+    for (i = 0; i < sb_list_count; i++) {
+        unsigned s;
+        bool is_btoc = false;
+        uint64_t weave = 0;
 
-    /*
-     * Fast path: rebuild straight from the list pass one wrote down.
-     *
-     * This is the difference between one sweep of the NAND and two. The old
-     * path re-read every BTOC page on the device to re-find superblocks that
-     * had already been identified minutes earlier, which roughly doubled
-     * mount time for no new information.
-     *
-     * The full sweep survives below purely for the overflow case.
-     */
-    if (stat_sbs_open && !open_sb_overflow) {
-        unsigned i;
-
-        prog_total = open_sb_count;
-        prog_want = 0;
-
-        for (i = 0; i < open_sb_count; i++) {
-            prog_cur = i + 1;
+        prog_cur = i + 1;
+        if ((prog_cur % PROG_EVERY) == 0)
             ftl_progress_paint();
-            rebuild_open_sb(open_sbs[i].ce, open_sbs[i].cau,
-                            open_sbs[i].block);
-        }
-    }
-    else if (stat_sbs_open) {
-        unsigned done = 0;
-        unsigned swept = 0;
 
-        for (block = 0; block < SB_COUNT && done < stat_sbs_open; block++) {
-            for (ce = 0; ce < NAND_MAX_CE; ce++) {
-                for (cau = 0; cau < NAND_MAX_CAU; cau++) {
-                    unsigned s;
-                    bool is_btoc = false;
+        if (cxt_loaded && sb_list[i].weave <= cxt_weave)
+            continue;
 
-                    prog_cur = ++swept;
-                    if ((swept % PROG_EVERY) == 0)
-                        ftl_progress_paint();
+        if (nand_cs_phys_read(sb_list[i].ce, sb_list[i].cau,
+                              sb_list[i].block, NAND_BTOC_PAGE, &scratch))
+            continue;
 
-                    if (nand_cs_phys_read(ce, cau, block, NAND_BTOC_PAGE,
-                                          &scratch))
-                        continue;
-                    if (page_blank(&scratch))
-                        continue;
-
-                    for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
-                        if (scratch.meta[s].valid &&
-                            scratch.meta[s].type == NAND_META_TYPE_BTOC) {
-                            is_btoc = true;
-                            break;
-                        }
-                    }
-                    if (is_btoc)
-                        continue;
-
-                    rebuild_open_sb(ce, cau, block);
-                    prog_found = ++done;
-                    ftl_progress_paint();
+        if (!page_blank(&scratch)) {
+            for (s = 0; s < NAND_SLOTS_PER_PAGE; s++) {
+                if (scratch.meta[s].valid &&
+                    scratch.meta[s].type == NAND_META_TYPE_BTOC) {
+                    is_btoc = true;
+                    weave = scratch.meta[s].weave;
+                    break;
                 }
             }
         }
+
+        prog_found++;
+
+        if (is_btoc) {
+            stat_sbs_closed++;
+            btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
+                        sb_list[i].ce, sb_list[i].cau, sb_list[i].block,
+                        weave);
+        } else {
+            /* Written, no BTOC: still open. Rebuild it page by page. */
+            stat_sbs_open++;
+            rebuild_open_sb(sb_list[i].ce, sb_list[i].cau, sb_list[i].block);
+        }
     }
 
-    prog_want = 0;
     prog_phase = "pack";
     ftl_progress_paint();
     ranges_coalesce();
@@ -1104,8 +1046,8 @@ int ftl_recover(void)
     if (!find_fat_base()) {
         /*
          * A map with no recognisable boot sector is not a mountable volume.
-         * Report that rather than exporting an offset of zero and letting
-         * the FAT layer read gibberish.
+         * Report that rather than exporting an offset of zero and letting the
+         * FAT layer read gibberish.
          */
         ftl_is_ready = false;
         prog_phase = "no-bpb";
