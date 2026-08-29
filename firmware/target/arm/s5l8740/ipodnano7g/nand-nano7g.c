@@ -106,12 +106,12 @@ int nand_init(void)
     if (!storage_ready) {
         unsigned ranges = 0, mapped = 0, closed = 0, open = 0;
         unsigned written = 0, empty = 0, replayed = 0, dropped = 0;
-        unsigned skipped = 0, fallback = 0;
+        unsigned skipped = 0, fallback = 0, form0 = 0, form1 = 0, rdfail = 0;
         bool cxt = false, overflow = false;
 
         ftl_get_stats(&ranges, &mapped, &closed, &open);
         ftl_get_cxt_stats(&cxt, &written, &empty, &replayed, &dropped,
-                          &skipped, &overflow, &fallback);
+                          &skipped, &overflow, &fallback, &form0, &form1, &rdfail);
 
         lcd_clear_display();
         lcd_putsf(0, 0, "FTL %s", ftl_last_phase());
@@ -121,6 +121,7 @@ int nand_init(void)
         lcd_putsf(0, 4, "cl %u  op %u  drop %u", closed, open, dropped);
         lcd_putsf(0, 5, "skip %u  fb %u %s", skipped, fallback,
                   overflow ? "OVERFLOW" : "");
+        lcd_putsf(0, 6, "btoc %u/%u  rdf %u", form0, form1, rdfail);
         lcd_update();
 
         sleep(5 * HZ);

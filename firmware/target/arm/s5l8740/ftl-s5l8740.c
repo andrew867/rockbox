@@ -124,6 +124,8 @@ static unsigned stat_cxt_self;      /* extents inside a context superblock */
 static unsigned stat_cxt_hole;      /* extents the context marks as free space */
 static unsigned stat_skipped;       /* closed SBs the checkpoint already covers */
 static unsigned stat_btoc_fallback; /* closed SBs whose BTOC parsed to nothing */
+static unsigned stat_btoc_form[2];  /* [0] plain record array, [1] 8-byte header */
+static unsigned stat_sweep_readfail; /* page 0 unreadable; replayed anyway */
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
@@ -350,68 +352,6 @@ static uint32_t get_be32(const uint8_t *p)
          | ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
 }
 
-/*
- * A BTOC is an array of big-endian logical page numbers indexed by position
- * within the superblock. Two granularities occur: one entry per slot, or one
- * entry per page covering four slots. Which one is in use is inferred from
- * how many valid entries there are before the 0xFFFFFFFF terminator, exactly
- * as the Linux driver does -- a count that fits in the page count means page
- * granularity.
- */
-static unsigned btoc_ingest(const uint8_t *btoc, unsigned len,
-                            unsigned ce, unsigned cau, unsigned block,
-                            uint64_t weave)
-{
-    unsigned i, n, valid = 0, added = 0;
-    bool page_gran;
-
-    n = len / 4;
-    if (n > DATA_PAGES_PER_SB * NAND_SLOTS_PER_PAGE)
-        n = DATA_PAGES_PER_SB * NAND_SLOTS_PER_PAGE;
-
-    for (i = 0; i < n; i++) {
-        if (get_be32(btoc + i * 4) == LBA_BLANK)
-            break;
-        valid++;
-    }
-
-    if (!valid)
-        return 0;
-
-    page_gran = valid <= DATA_PAGES_PER_SB;
-    if (page_gran)
-        n = valid;
-
-    for (i = 0; i < n; i++) {
-        uint32_t lpn = get_be32(btoc + i * 4);
-        unsigned pg, slot;
-
-        if (lpn == LBA_BLANK || lba_is_special(lpn))
-            continue;
-
-        if (page_gran) {
-            /*
-             * One entry per page: the entry names the first of four
-             * consecutive logical pages, one per slot.
-             */
-            unsigned k;
-
-            pg = i;
-            for (k = 0; k < NAND_SLOTS_PER_PAGE; k++) {
-                map_add(lpn * NAND_SLOTS_PER_PAGE + k,
-                        phys_to_vba(ce, cau, block, pg, k), weave);
-                added++;
-            }
-        } else {
-            pg = i / NAND_SLOTS_PER_PAGE;
-            slot = i % NAND_SLOTS_PER_PAGE;
-            map_add(lpn, phys_to_vba(ce, cau, block, pg, slot), weave);
-            added++;
-        }
-    }
-
-    return added;
-}
 
 /* ------------------------------------------------------------- scanning -- */
 
@@ -522,11 +462,15 @@ static unsigned open_sb_start(unsigned ce, unsigned cau, unsigned block)
     return lo;
 }
 
-static void rebuild_open_sb(unsigned ce, unsigned cau, unsigned block)
+static void rebuild_sb_pages(unsigned ce, unsigned cau, unsigned block,
+                             unsigned limit)
 {
     unsigned pg;
 
-    for (pg = open_sb_start(ce, cau, block); pg < DATA_PAGES_PER_SB; pg++) {
+    if (limit > DATA_PAGES_PER_SB)
+        limit = DATA_PAGES_PER_SB;
+
+    for (pg = open_sb_start(ce, cau, block); pg < limit; pg++) {
         if (nand_cs_phys_read(ce, cau, block, pg, &scratch))
             break;
 
@@ -539,6 +483,120 @@ static void rebuild_open_sb(unsigned ce, unsigned cau, unsigned block)
 
         ingest_page_meta(&scratch, ce, cau, block, pg);
     }
+}
+
+static void rebuild_open_sb(unsigned ce, unsigned cau, unsigned block)
+{
+    rebuild_sb_pages(ce, cau, block, DATA_PAGES_PER_SB);
+}
+
+/* ------------------------------------------------------------------ BTOC */
+
+/*
+ * A BTOC page is an array of 16-byte big-endian records, built by s_btoc.c
+ * sub_567E3C:
+ *
+ *   struct { u32 weaveSeqAdd; u32 aux; u32 lba; u32 span; }
+ *
+ * The decomp is worth reading for what it rules out. It always writes a real
+ * span -- the caller asserts "0 != chunk" first, then it does
+ * nextVbaOfs += span and asserts the VBA still matches
+ * s_g_addr_to_vba(sb, nextVbaOfs). So a zero span was never written as a
+ * record, and aux is not a length: at the call site it is
+ * *(a1[8] + 12), a tag lifted from a stream descriptor.
+ *
+ * Records are consecutive in VBA space: record N covers vba_ofs ..
+ * vba_ofs+span-1 within this block, with vba_ofs accumulating. That makes the
+ * SUM OF SPANS the number of live VBAs in the superblock, which is the only
+ * thing we actually want from the page.
+ *
+ * Two layouts occur. Some pages begin with the record array; 255 of 563 closed
+ * superblocks on the Linux side instead carry an eight-byte header first, and
+ * every one of those was being dropped -- 127 pages and about 2032 LBAs each,
+ * which is what left directories unreadable on a volume whose FAT mounted
+ * cleanly. Both offsets are tried.
+ *
+ * What is deliberately NOT taken from here is the mapping. The BTOC is a
+ * physical-slot index; the per-slot meta is the authority, and the Linux
+ * driver records why in one line -- "zeros/holes in BTOC were poisoning
+ * L2V[0]". So this only decides HOW MANY PAGES TO READ, and every LBA still
+ * comes from the meta of the page it was found in. A BTOC we misread costs
+ * time, never correctness.
+ */
+#define BTOC_REC_SIZE           16
+#define BTOC_HDR_SIZE           8
+#define BTOC_VBAS_PER_SB        (NAND_PAGES_PER_BLOCK * NAND_SLOTS_PER_PAGE)
+#define BTOC_DATA_VBAS_PER_SB   (DATA_PAGES_PER_SB * NAND_SLOTS_PER_PAGE)
+
+/* Tokens that advance the VBA cursor without describing user data. */
+static bool btoc_lba_is_token(uint32_t lba)
+{
+    return lba == LBA_BLANK || lba == LBA_HOLE ||
+           lba == LBA_DELETED || lba == LBA_LIST;
+}
+
+/*
+ * Sum the spans of a record array at `off`. Returns the live VBA count, or -1
+ * if the bytes there do not read as records.
+ */
+static int btoc_scan(const uint8_t *p, unsigned len, unsigned off)
+{
+    unsigned i, vbas = 0, recs = 0;
+
+    if (off + BTOC_REC_SIZE > len)
+        return -1;
+
+    /*
+     * weaveSeqAdd is a delta from the block's base weave, so the first record
+     * is always zero. It is the cheapest way to tell a record array from a
+     * header, and it is what distinguishes the two layouts.
+     */
+    if (get_be32(p + off) != 0)
+        return -1;
+
+    for (i = off; i + BTOC_REC_SIZE <= len; i += BTOC_REC_SIZE) {
+        uint32_t lba  = get_be32(p + i + 8);
+        uint32_t span = get_be32(p + i + 12);
+
+        if (!span || span > BTOC_DATA_VBAS_PER_SB)
+            break;                      /* end of array, or not one */
+        if (!btoc_lba_is_token(lba) && lba >= 0x01000000u)
+            break;
+        if (vbas + span > BTOC_VBAS_PER_SB)
+            break;
+
+        vbas += span;
+        recs++;
+    }
+
+    return recs ? (int)vbas : -1;
+}
+
+/*
+ * How many pages of this superblock hold data.
+ *
+ * Returns the page count, or -1 when the BTOC does not parse in either
+ * layout -- including the shape that is a header followed by zeros where the
+ * first record would be. Those cannot be assumed empty: the block may be full
+ * and simply have no record array, in which case the only account of its
+ * contents is the per-page meta.
+ */
+static int btoc_live_pages(const uint8_t *p, unsigned len, unsigned *form)
+{
+    int vbas;
+
+    vbas = btoc_scan(p, len, 0);
+    if (vbas >= 0) {
+        *form = 0;
+    } else {
+        vbas = btoc_scan(p, len, BTOC_HDR_SIZE);
+        if (vbas < 0)
+            return -1;
+        *form = 1;
+    }
+
+    return (int)(((unsigned)vbas + NAND_SLOTS_PER_PAGE - 1) /
+                 NAND_SLOTS_PER_PAGE);
 }
 
 /* ------------------------------------------------------------- recover -- */
@@ -1033,6 +1091,8 @@ static bool sb_sweep_page0(void)
     stat_probe_empty = 0;
     stat_cxt_oob = stat_cxt_self = stat_cxt_hole = 0;
     stat_skipped = stat_btoc_fallback = 0;
+    stat_btoc_form[0] = stat_btoc_form[1] = 0;
+    stat_sweep_readfail = 0;
 
     prog_phase = "scan";
     prog_total = SB_COUNT * BANKS;
@@ -1074,6 +1134,31 @@ static bool sb_sweep_page0(void)
                      */
                     if (!any_ok && ++cold_fails >= COLD_FAIL_LIMIT)
                         return false;
+
+                    /*
+                     * A block whose page 0 will not read is NOT an empty
+                     * block, and dropping it here is the same mistake as
+                     * treating an unparsed BTOC as empty: it silently removes
+                     * up to 127 pages of data with nothing but a counter to
+                     * show for it.
+                     *
+                     * Page 0 being unreadable says nothing about pages 1..126.
+                     * So it goes on the list with a zero weave and the replay
+                     * decides -- reading page 127 for a BTOC, and falling back
+                     * to the per-page walk, which needs no recognisable
+                     * structure at all. The cost is bounded the same way
+                     * everything else here is: the walk stops at the first
+                     * blank or unreadable page, so a genuinely dead block
+                     * costs one more read.
+                     */
+                    if (sb_list_count < SB_LIST_MAX) {
+                        sb_list[sb_list_count].block = (uint16_t)block;
+                        sb_list[sb_list_count].ce    = (uint8_t)ce;
+                        sb_list[sb_list_count].cau   = (uint8_t)cau;
+                        sb_list[sb_list_count].weave = 0;
+                        sb_list_count++;
+                    }
+                    stat_sweep_readfail++;
                     continue;
                 }
 
@@ -1277,7 +1362,7 @@ int ftl_recover(void)
              * A BTOC that parses to nothing must NOT be treated as an empty
              * superblock.
              *
-             * btoc_ingest() understands the big-endian layouts and returns 0
+             * btoc_live_pages() understands both record layouts and returns -1
              * for anything else. The Linux side measured what that costs:
              * 255 of 563 closed superblocks read and then dropped, each one
              * 127 pages and roughly 2032 LBAs of directory and file data. The
@@ -1296,12 +1381,26 @@ int ftl_recover(void)
              * So the BTOC stays the fast path and the per-page walk is the
              * floor underneath it.
              */
-            if (btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
-                            sb_list[i].ce, sb_list[i].cau, sb_list[i].block,
-                            weave) == 0) {
-                stat_btoc_fallback++;
-                rebuild_open_sb(sb_list[i].ce, sb_list[i].cau,
-                                sb_list[i].block);
+            {
+                unsigned form = 0;
+                int pages = btoc_live_pages(scratch.data[0], NAND_SLOT_DATA,
+                                            &form);
+
+                if (pages < 0) {
+                    /*
+                     * Neither layout parsed. Read the whole block rather than
+                     * assume it is empty -- an unparsed BTOC says nothing
+                     * about how full the block is, and treating it as empty
+                     * is what silently loses 127 pages of directory data.
+                     */
+                    stat_btoc_fallback++;
+                    pages = DATA_PAGES_PER_SB;
+                } else {
+                    stat_btoc_form[form]++;
+                }
+
+                rebuild_sb_pages(sb_list[i].ce, sb_list[i].cau,
+                                 sb_list[i].block, (unsigned)pages);
             }
         } else {
             /*
@@ -1442,7 +1541,8 @@ uint32_t ftl_disk_sectors(void)
 void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
                        unsigned *replayed, unsigned *dropped,
                        unsigned *skipped, bool *overflow,
-                       unsigned *fallback)
+                       unsigned *fallback, unsigned *form0,
+                       unsigned *form1, unsigned *readfail)
 {
     if (loaded)
         *loaded = cxt_loaded;
@@ -1456,6 +1556,12 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
         *skipped = stat_skipped;
     if (fallback)
         *fallback = stat_btoc_fallback;
+    if (form0)
+        *form0 = stat_btoc_form[0];
+    if (form1)
+        *form1 = stat_btoc_form[1];
+    if (readfail)
+        *readfail = stat_sweep_readfail;
     if (overflow)
         *overflow = ranges_overflowed;
     if (replayed)

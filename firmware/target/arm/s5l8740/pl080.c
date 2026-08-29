@@ -69,10 +69,20 @@ static const uint32_t dmac_base[PL080_NDMAC] = { DMAC0_BASE, DMAC1_BASE };
 
 #define DMA_REG(d, off) (*(REG32_PTR_T)(dmac_base[d] + (off)))
 
+/*
+ * How many DMA errors a channel may raise before it is refused.
+ *
+ * Restarting a channel that errors on every attempt just resumes the storm,
+ * and eight is well past the point where a transient becomes a pattern.
+ */
+#define CH_ERR_LIMIT    8
+
 struct pl080_ch_state {
     pl080_callback  cb;
     void           *data;
     bool            allocated;
+    uint8_t         errors;
+    bool            stuck;
 };
 
 static struct pl080_ch_state ch_state[PL080_NDMAC][PL080_NCHANNELS];
@@ -84,13 +94,38 @@ static void pl080_irq(int dmac)
     int ch;
 
     if (err) {
-        DMA_REG(dmac, INT_ERR_CLEAR) = err;
         /*
-         * An error here means a bad descriptor or a bus fault, not something
-         * recoverable by retrying. Say so loudly rather than silently
-         * producing corrupt audio.
+         * DISABLE THE CHANNEL BEFORE CLEARING THE LATCH.
+         *
+         * Clearing an error while the channel is still enabled means whatever
+         * raised it raises it again immediately, and the handler clears it
+         * again. On a single core that is an interrupt storm, which from
+         * outside is indistinguishable from a lockup -- and it explains a
+         * failure that arrives after a few seconds of working playback rather
+         * than at the first period.
+         *
+         * This used to panicf() instead, which avoids the storm by killing
+         * the device outright. That is not better. A DMA error on an audio
+         * channel is a recoverable audio fault, and turning it into a dead
+         * machine loses every other thing the firmware could have told us --
+         * the difference between a bug and a bug you cannot debug.
+         *
+         * So: stop the channel, clear the latch, count it, and after
+         * CH_ERR_LIMIT refuse to start it again. Audio stops; the device
+         * stays up and can say why.
          */
-        panicf("PL080%d DMA error, channels %08lx", dmac, (unsigned long)err);
+        for (ch = 0; ch < PL080_NCHANNELS; ch++) {
+            if (!(err & (1 << ch)))
+                continue;
+
+            DMA_REG(dmac, Cx_CFG(ch)) = 0;
+
+            if (ch_state[dmac][ch].errors < CH_ERR_LIMIT &&
+                ++ch_state[dmac][ch].errors >= CH_ERR_LIMIT)
+                ch_state[dmac][ch].stuck = true;
+        }
+
+        DMA_REG(dmac, INT_ERR_CLEAR) = err;
     }
 
     if (!tc)
@@ -159,6 +194,8 @@ void pl080_free_channel(int dmac, int channel)
     ch_state[dmac][channel].cb = NULL;
     ch_state[dmac][channel].data = NULL;
     ch_state[dmac][channel].allocated = false;
+    ch_state[dmac][channel].errors = 0;
+    ch_state[dmac][channel].stuck = false;
 }
 
 void pl080_set_callback(int dmac, int channel, pl080_callback cb, void *data)
@@ -187,6 +224,14 @@ static uint32_t pl080_ctl(int width, int count, bool src_ai, bool dst_ai)
 void pl080_start_m2p(int dmac, int channel, const void *src, uint32_t dst_reg,
                      int peri, int width, int count)
 {
+    /*
+     * A channel that has errored CH_ERR_LIMIT times is not restarted.
+     * Handing it another descriptor only reproduces the fault, and the
+     * handler would stop it again on the next interrupt.
+     */
+    if (ch_state[dmac][channel].stuck)
+        return;
+
     DMA_REG(dmac, Cx_CFG(channel)) = 0;
 
     DMA_REG(dmac, Cx_SRC(channel)) = (uint32_t)src;
@@ -204,6 +249,14 @@ void pl080_start_m2p(int dmac, int channel, const void *src, uint32_t dst_reg,
 void pl080_start_p2m(int dmac, int channel, uint32_t src_reg, void *dst,
                      int peri, int width, int count)
 {
+    /*
+     * A channel that has errored CH_ERR_LIMIT times is not restarted.
+     * Handing it another descriptor only reproduces the fault, and the
+     * handler would stop it again on the next interrupt.
+     */
+    if (ch_state[dmac][channel].stuck)
+        return;
+
     DMA_REG(dmac, Cx_CFG(channel)) = 0;
 
     DMA_REG(dmac, Cx_SRC(channel)) = src_reg;
