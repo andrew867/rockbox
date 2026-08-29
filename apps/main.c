@@ -23,9 +23,13 @@
 #include "boot-beacon.h"
 #define N7G_BEACON(c) beacon_stage(c)
 #define N7G_MARK(c)   beacon_mark(c)
+#define N7G_STAGE(s)  n7g_stage(s)
+static void n7g_stage(const char *what);
+
 #else
 #define N7G_BEACON(c) do { } while (0)
 #define N7G_MARK(c)   do { } while (0)
+#define N7G_STAGE(s)  do { } while (0)
 #endif
 
 #include "version.h"
@@ -165,6 +169,30 @@
 // #define AUTOROCK     VIEWERS_DATA_DIR"/imageviewer.rock"
 // #define AUTOROCK_ARG "/jpegs/sample.jpg"
 
+/*
+ * Named stages, held long enough to read.
+ *
+ * The colour beacons did their job while there was no C runtime to rely on,
+ * but past storage_init() they stop being useful: five stages flash by in
+ * well under a second, and "a bunch of colours went past" does not identify
+ * which one was last. A colour also cannot say anything a colour was not
+ * assigned in advance.
+ *
+ * By this point the kernel, the tick and the display are all up, so text and
+ * a real sleep() are available and there is no reason not to use them. Each
+ * stage names itself and holds for a second.
+ *
+ * Deliberately temporary: this adds seconds to every boot and comes out as
+ * soon as the home screen is reached.
+ */
+static void n7g_stage(const char *what)
+{
+    lcd_clear_display();
+    lcd_putsxy(4, 4,  "N7G stage");
+    lcd_putsxy(4, 20, what);
+    lcd_update();
+    sleep(HZ);
+}
 static void init(void);
 /* main(), and various functions called by main() and init() may be
  * be INIT_ATTR. These functions must not be called after the final call
@@ -271,7 +299,7 @@ int main(void)
     validate_start_directory_init();
     /* no calls INIT_ATTR functions after this point anymore!
      * see definition of INIT_ATTR in config.h */
-    N7G_MARK(BEACON_WHITE);
+    N7G_STAGE("root_menu");
     CHART(">root_menu");
     root_menu();
 }
@@ -713,7 +741,7 @@ static void init(void)
 
     if (!mounted)
     {
-        N7G_MARK(BEACON_CYAN);
+        N7G_STAGE("disk_mount_all");
         CHART(">disk_mount_all");
         rc = disk_mount_all();
         CHART("<disk_mount_all");
@@ -780,7 +808,7 @@ static void init(void)
     pcm_init();
     dsp_init();
 
-    N7G_MARK(BEACON_BLUE);
+    N7G_STAGE("settings_load");
     CHART(">settings_load");
     settings_load();
     CHART("<settings_load");
@@ -807,7 +835,7 @@ static void init(void)
     init_battery_tables();
     CHART("<init_battery_tables");
 #ifdef HAVE_DIRCACHE
-    N7G_MARK(BEACON_MAGENTA);
+    N7G_STAGE("init_dircache");
     CHART(">init_dircache(true)");
     rc = init_dircache(true);
     CHART("<init_dircache(true)");
@@ -826,7 +854,7 @@ static void init(void)
     CHART("<init_dircache(false)");
 #endif
 #ifdef HAVE_TAGCACHE
-    N7G_MARK(BEACON_ORANGE);
+    N7G_STAGE("init_tagcache");
     CHART(">init_tagcache");
     init_tagcache();
     CHART("<init_tagcache");
