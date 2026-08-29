@@ -41,6 +41,7 @@ struct cs42l81_route {
     uint8_t r054f;
     uint8_t r0075;
     uint8_t r0220;
+    uint8_t r002f;   /* bit 6: ASP locked, read live */
     bool    locked;
 };
 

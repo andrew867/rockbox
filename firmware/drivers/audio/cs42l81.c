@@ -24,7 +24,9 @@
 #include "config.h"
 #include "system.h"
 #include "kernel.h"
+#include "audio.h"
 #include "audiohw.h"
+#include "pcm_sampr.h"
 #include "spi-s5l8740.h"
 #include "iis-s5l8740.h"
 #include "pmu-target.h"
@@ -78,6 +80,9 @@
 #define CS42_R0079          0x0079
 #define CS42_R010B          0x010b
 #define CS42_R010C          0x010c
+#define CS42_R0121          0x0121  /* SRC ratio pair */
+#define CS42_R0122          0x0122
+#define CS42_R0130          0x0130  /* SRC rate code */
 #define CS42_R012F          0x012f
 #define CS42_R0131          0x0131
 #define CS42_R0219          0x0219
@@ -108,6 +113,7 @@ static bool cs42_up;
 static bool cs42_muted = true;
 static int  cs42_vol_l = 0, cs42_vol_r = 0;   /* in codec attenuation steps */
 static bool cs42_asp_locked;
+static unsigned int cs42_rate = 44100;
 
 /* ------------------------------------------------------------------ SPI */
 
@@ -123,14 +129,29 @@ static void cs42_write(uint16_t reg, uint8_t val)
 }
 
 /*
- * There is no proven read frame in the RE corpus, so register state is
- * shadowed in software rather than read back. Every read-modify-write below
- * therefore works from the shadow.
+ * Read frame: 0x6D, register high, register low, 0x00, dummy. The returned
+ * byte is the fifth of the reply.
  *
- * That is a real limitation: it means this driver cannot see the ASP lock
- * bit at 0x002F, and cs42l81_asp_lock() has to pulse-and-hope rather than
- * poll. Recovering the read frame would let the lock be confirmed instead of
- * assumed, and is the single most valuable next piece of RE for audio.
+ * Reads matter here beyond convenience: the ASP lock state at 0x002F bit 6 is
+ * only observable this way, so with reads the lock becomes a measurement
+ * rather than an assumption.
+ */
+static uint8_t cs42_read(uint16_t reg)
+{
+    uint8_t tx[5] = { 0x6d, (uint8_t)(reg >> 8), (uint8_t)reg, 0x00, 0xff };
+    uint8_t rx[5] = { 0 };
+
+    if (spi_transfer(SPI_PORT_CODEC, tx, rx, sizeof(tx)) < 0)
+        return 0;
+
+    return rx[4];
+}
+
+/*
+ * A write-through shadow is still kept, but only so the debug screen can show
+ * the route without extra bus traffic. Read-modify-write goes to the device,
+ * because the codec changes some of these bits by itself and an RMW built on
+ * a stale shadow would quietly undo that.
  */
 #define SHADOW_MAX  0x600
 static uint8_t shadow[SHADOW_MAX];
@@ -144,7 +165,7 @@ static void cs42_set(uint16_t reg, uint8_t val)
 
 static void cs42_rmw(uint16_t reg, uint8_t mask, uint8_t val)
 {
-    uint8_t cur = (reg < SHADOW_MAX) ? shadow[reg] : 0;
+    uint8_t cur = cs42_read(reg);
 
     cur = (uint8_t)((cur & ~mask) | (val & mask));
     cs42_set(reg, cur);
@@ -178,22 +199,59 @@ static void cs42_backpower(void)
 }
 
 /*
- * Serial/clock control for the current sample rate.
+ * Serial/clock control for a given sample rate (sub_183138).
  *
- * The 0x000E bits 7:6 -> 11, program, then -> 01 bracket is how the stock
- * code applies a clock change: the field is parked while 0x000F / 0x012F are
- * written and then committed.
+ * The 0x000E bits 7:6 -> 11, program, then -> 01 bracket is how the stock code
+ * applies a clock change: the field is parked while the rate registers are
+ * written, then committed.
+ *
+ * Almost none of this is constant across rates, which is easy to miss because
+ * at 48 kHz the rate code is 12 = 0xC and the values come out looking like
+ * the fixed 0x0C / 0xCC that the 48 kHz sequence documents:
+ *
+ *   0x000F low nibble = code
+ *   0x012F            = code | (code << 4)
+ *
+ * And the codec takes one of two arms depending on whether its sample-rate
+ * converter is needed:
+ *
+ *   code == 12 (48 kHz)   0x10B/0x10C = 8/9, 0x131 bit0 = 1   (direct)
+ *   otherwise             0x121/0x122 = 8/9, 0x130 low = code,
+ *                         0x131 bit0 = 0, 0x10B/0x10C = 4/0x33  (SRC)
+ *
+ * Taking the 48 kHz arm while the IIS divider runs 44.1 kHz is an ASP/SRC
+ * mismatch, and it does not fail quietly -- it produces pulsed noise. The
+ * Linux driver shipped that bug and it is worth not repeating: Rockbox's
+ * default rate is 44.1 kHz, so the wrong arm would be the normal case.
  */
-static void cs42_serial_setup(void)
+static void cs42_serial_setup(unsigned int rate)
 {
+    uint8_t code = iis_codec_rate_code(rate);
+
     cs42_rmw(CS42_R000E, 0xc0, 0xc0);   /* park */
-    cs42_rmw(CS42_R000F, 0x0f, 0x0c);
-    cs42_set(CS42_R012F, 0xcc);
-    cs42_set(CS42_R010B, 0x08);
-    cs42_set(CS42_R010C, 0x09);
-    cs42_rmw(CS42_R0131, 0x01, 0x01);
+
+    cs42_rmw(CS42_R000F, 0x0f, code);
+    cs42_set(CS42_R012F, (uint8_t)(code | (code << 4)));
+
+    if (code == 12) {
+        /* 48 kHz: the DAC clocks straight off the ASP. */
+        cs42_set(CS42_R010B, 0x08);
+        cs42_set(CS42_R010C, 0x09);
+        cs42_rmw(CS42_R0131, 0x01, 0x01);
+    } else {
+        /* Everything else runs through the sample-rate converter. */
+        cs42_set(CS42_R0121, 0x08);
+        cs42_set(CS42_R0122, 0x09);
+        cs42_rmw(CS42_R0130, 0x0f, code);
+        cs42_rmw(CS42_R0131, 0x01, 0x00);
+        cs42_set(CS42_R010B, 0x04);
+        cs42_set(CS42_R010C, 0x33);
+    }
+
     cs42_rmw(CS42_R000E, 0xc0, 0x40);   /* commit */
     cs42_rmw(CS42_R0220, 0x20, 0x20);   /* ASP enable */
+
+    cs42_rate = rate;
 }
 
 /*
@@ -315,7 +373,7 @@ void audiohw_preinit(void)
 
     cs42_init_once();
     cs42_backpower();
-    cs42_serial_setup();
+    cs42_serial_setup(cs42_rate);
     cs42_mixer_setup();
     cs42_output_enable();
     cs42_headset_sense();
@@ -357,11 +415,10 @@ void audiohw_close(void)
  * clock, so running it at probe time completes every write and achieves
  * nothing.
  *
- * The stock recovery pulses ASP enable off and on, reprograms the clock
- * registers, and re-polls the lock bit. Without a proven read frame we cannot
- * observe 0x002F bit 6, so this pulses the documented number of times and
- * reports optimistically -- an assumption that is called out here rather than
- * buried.
+ * The lock state is genuinely observable at 0x002F bit 6, so this polls it
+ * rather than assuming success. On failure the stock recovery is to pulse ASP
+ * enable off and on and reprogram the clock registers, which is what the
+ * retry loop does.
  */
 void cs42l81_asp_lock(void)
 {
@@ -371,22 +428,36 @@ void cs42l81_asp_lock(void)
         return;
 
     for (attempt = 0; attempt < 3; attempt++) {
+        int poll;
+
         if (attempt > 0) {
             cs42_rmw(CS42_R0220, 0x20, 0x00);
             udelay(50);
             cs42_rmw(CS42_R0220, 0x20, 0x20);
+
+            /* Reprogram for the rate actually in use, not a fixed 48 kHz. */
+            cs42_serial_setup(cs42_rate);
         }
 
-        cs42_rmw(CS42_R000E, 0xc0, 0xc0);
-        cs42_rmw(CS42_R000F, 0x0f, 0x0c);
-        cs42_set(CS42_R012F, 0xcc);
-        cs42_rmw(CS42_R000E, 0xc0, 0x40);
-
-        udelay(1000);
+        for (poll = 0; poll < 3; poll++) {
+            udelay(1000);
+            if (cs42_read(CS42_R002F) & 0x40) {
+                cs42_asp_locked = true;
+                goto locked;
+            }
+        }
     }
 
-    cs42_asp_locked = true;
+    /*
+     * Three full recovery attempts and the port never locked. Say so through
+     * the flag rather than reporting success -- the debug screen surfaces it,
+     * and silence with asp_locked=0 is a very different bug from silence with
+     * asp_locked=1.
+     */
+    cs42_asp_locked = false;
+    return;
 
+locked:
     /* Re-assert the playback route; the pulse above can drop it. */
     cs42_set(CS42_R0527, cs42_muted ? CS42_MUTE_ATTEN : CS42_UNMUTE_ATTEN);
     cs42_rmw(CS42_R0401, 0x03, cs42_muted ? 0x01 : 0x02);
@@ -399,23 +470,31 @@ bool cs42l81_asp_is_locked(void)
 
 void audiohw_set_frequency(int fsel)
 {
-    (void)fsel;
+    unsigned int rate;
 
-    if (!cs42_up)
+    if (fsel < 0 || fsel >= HW_NUM_FREQ)
         return;
 
     /*
-     * The codec's own rate code comes from the same resolver the IIS divider
+     * The codec's rate code comes from the same resolver the IIS divider
      * uses, so the two halves of the link cannot end up configured for
      * different rates.
-     *
-     * TODO: the RE corpus only pins the 48 kHz serial control block
-     * (0x010B/0x010C = 08/09). The per-rate values for the others are not
-     * recovered, so every rate currently programs the 48 kHz block. Fix this
-     * once a capture at another rate exists -- until then a non-48k stream
-     * will clock wrong even though the divider is right.
      */
-    cs42_serial_setup();
+    rate = hw_freq_sampr[fsel];
+
+    if (!cs42_up) {
+        cs42_rate = rate;
+        return;
+    }
+
+    cs42_serial_setup(rate);
+
+    /*
+     * A rate change re-parks and re-commits the ASP, so whatever lock existed
+     * is no longer trustworthy. Drop the flag and let the next play re-lock
+     * against the new clock.
+     */
+    cs42_asp_locked = false;
 }
 
 void audiohw_set_volume(int vol_l, int vol_r)
@@ -464,13 +543,16 @@ void cs42l81_get_route(struct cs42l81_route *r)
     if (!r)
         return;
 
-    r->r0401 = shadow[CS42_R0401];
-    r->r0403 = shadow[CS42_R0403];
-    r->r0404 = shadow[CS42_R0404];
-    r->r0500 = shadow[CS42_R0500];
-    r->r0527 = shadow[CS42_R0527];
-    r->r054f = shadow[CS42_R054F];
-    r->r0075 = shadow[CS42_R0075];
-    r->r0220 = shadow[CS42_R0220];
+    /* Read the device rather than the shadow: the point of this screen is
+       to show what the codec actually thinks, not what we told it. */
+    r->r0401 = cs42_read(CS42_R0401);
+    r->r0403 = cs42_read(CS42_R0403);
+    r->r0404 = cs42_read(CS42_R0404);
+    r->r0500 = cs42_read(CS42_R0500);
+    r->r0527 = cs42_read(CS42_R0527);
+    r->r054f = cs42_read(CS42_R054F);
+    r->r0075 = cs42_read(CS42_R0075);
+    r->r0220 = cs42_read(CS42_R0220);
+    r->r002f = cs42_read(CS42_R002F);
     r->locked = cs42_asp_locked;
 }

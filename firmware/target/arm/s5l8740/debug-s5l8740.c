@@ -156,7 +156,7 @@ bool dbg_audio(void)
         line++;
 
 #ifdef HAVE_CS42L81
-        lcd_putsf(0, line++, "CS42 asp_locked=%d", rt.locked);
+        lcd_putsf(0, line++, "CS42 lock=%d 002f=%02x", rt.locked, rt.r002f);
         lcd_putsf(0, line++, "0401=%02x 0403=%02x 0404=%02x",
                   rt.r0401, rt.r0403, rt.r0404);
         lcd_putsf(0, line++, "0500=%02x 0527=%02x 054f=%02x",
