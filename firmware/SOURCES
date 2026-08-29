@@ -1689,6 +1689,8 @@ target/arm/s5l8740/pl080.c
 target/arm/s5l8740/iis2-s5l8740.c
 target/arm/s5l8740/bcm2078-s5l8740.c
 target/arm/s5l8740/crypto-s5l8740.c
+target/arm/s5l8740/nand-s5l8740.c
+target/arm/s5l8740/ftl-s5l8740.c
 target/arm/s5l8740/uart-s5l8740.c
 target/arm/s5l8740/pcm-s5l8740.c
 target/arm/s5l8740/usb-s5l8740.c
