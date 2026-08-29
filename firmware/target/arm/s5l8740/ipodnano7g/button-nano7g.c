@@ -20,6 +20,8 @@
 #include "button.h"
 #include "gpio-s5l8740.h"
 #include "pmu-target.h"
+#include "touchscreen.h"
+#include "touch-nano7g.h"
 
 /*
  * Volume keys are SoC pads 40 and 41, active low.
@@ -48,9 +50,14 @@ void button_init_device(void)
      */
 }
 
-int button_read_device(void)
+/*
+ * With HAVE_BUTTON_DATA the touchscreen position is returned through *data,
+ * packed as (x << 16) | y, alongside the button bitmap.
+ */
+int button_read_device(int *data)
 {
     int btn = 0;
+    int x = 0, y = 0;
 
     if (!gpio_get(GPIO_PAD_VOLUP))
         btn |= BUTTON_VOL_UP;
@@ -58,6 +65,14 @@ int button_read_device(void)
         btn |= BUTTON_VOL_DOWN;
 
     btn |= pmu_read_buttons();
+
+    if (touchscreen_read_device(&x, &y)) {
+        /* touchscreen_to_pixels() fills *data itself, in whichever form the
+           current touchscreen mode wants (grid button or packed x/y). */
+        btn |= touchscreen_to_pixels(x, y, data);
+    } else {
+        *data = 0;
+    }
 
     return btn;
 }
