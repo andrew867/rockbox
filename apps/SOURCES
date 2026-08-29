@@ -191,6 +191,8 @@ keymaps/keymap-h1x0_h3x0.c
     || (CONFIG_KEYPAD == IPOD_3G_PAD) \
     || (CONFIG_KEYPAD == IPOD_1G2G_PAD))
 keymaps/keymap-ipod.c
+#elif CONFIG_KEYPAD == IPOD_NANO7G_PAD
+keymaps/keymap-ipodnano7g.c
 #elif CONFIG_KEYPAD == IAUDIO_X5M5_PAD
 keymaps/keymap-x5.c
 #elif CONFIG_KEYPAD == IAUDIO_M3_PAD
