@@ -22,6 +22,10 @@
 
 #if ARM_PROFILE == ARM_PROFILE_CLASSIC
 # include "system-arm-classic.h"
+#elif ARM_PROFILE == ARM_PROFILE_APPLICATION
+/* A-profile keeps the classic CPSR I/F masking model; only the cache and MMU
+   maintenance differs, and that lives in mmu-armv7a.S. */
+# include "system-arm-classic.h"
 #elif ARM_PROFILE == ARM_PROFILE_MICRO
 # include "system-arm-micro.h"
 #else
