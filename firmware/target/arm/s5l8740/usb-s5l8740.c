@@ -138,6 +138,24 @@ void usb_init_device(void)
     usb_dw_target_disable_irq();
 }
 
+#ifdef HAVE_USB_SOFT_DETACH
+/*
+ * Drop or restore the D+ pull-up without touching VBUS.
+ *
+ * DCTL.SFTDISCON is the whole trick: the host stops seeing a device, while
+ * the cable, VBUS and therefore charging are all completely unaffected. It is
+ * the same bit usb_dw_target_enable_clocks() already uses to hide the core
+ * while the PHY is reset -- this just exposes it as a deliberate action.
+ */
+void usb_soft_disconnect(bool disconnect)
+{
+    if (disconnect)
+        OTG_DCTL |= DCTL_SFTDISCON;
+    else
+        OTG_DCTL &= ~DCTL_SFTDISCON;
+}
+#endif
+
 void usb_enable(bool on)
 {
     if (on)

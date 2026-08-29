@@ -57,6 +57,12 @@
 #define LCD_HEIGHT 432
 /* sqrt(432^2 + 240^2) / 2.5" = 197.7 */
 #define LCD_DPI 198
+/*
+ * Software USB detach: drop the data connection on a HOME press and return to
+ * the UI with the cable still in and charging. See usb_soft_detach().
+ */
+#define HAVE_USB_SOFT_DETACH
+
 #define LCD_DEPTH  16
 #define LCD_PIXELFORMAT RGB565
 

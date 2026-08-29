@@ -243,6 +243,10 @@ void usb_clear_pending_transfer_completion_events(void);
  * functions and not this function.
  * for USB_NOTIFY_CLASS_DRIVER, use usb_signal_class_notify() instead */
 void usb_signal_notify(long id, intptr_t data);
+#ifdef HAVE_USB_SOFT_DETACH
+void usb_soft_disconnect(bool disconnect);  /* target: drop/restore D+ */
+void usb_soft_detach(void);                 /* leave USB mode, keep charging */
+#endif
 
 /* wrapper for usb_signal_notify(USB_NOTIFY_CLASS_DRIVER)
  * class_num: target driver. USB_DRIVER_*

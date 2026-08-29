@@ -104,6 +104,22 @@ static void handle_usb_events(struct viewport *title)
         }
         if (button == SYS_USB_DISCONNECTED)
             return;
+#ifdef HAVE_USB_SOFT_DETACH
+        /*
+         * Disconnect the DATA half only and go back to the UI, leaving the
+         * cable in and the battery charging.
+         *
+         * Returning here is not enough on its own -- usb_soft_detach() posts
+         * USB_EXTRACTED, and it is that event which makes the rest of the
+         * firmware let go of the disk. Falling out of this loop without it
+         * would leave storage still handed to the USB stack.
+         */
+        if (button == (BUTTON_HOME | BUTTON_REL))
+        {
+            usb_soft_detach();
+            return;
+        }
+#endif
         if (button == SYS_CHARGER_DISCONNECTED)
             reset_runtime();
 

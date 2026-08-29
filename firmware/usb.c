@@ -256,6 +256,16 @@ static inline void usb_configure_drivers(int for_state)
         usb_core_enable_driver(USB_DRIVER_CHARGING_ONLY, false);
 #endif
 
+#ifdef HAVE_USB_SOFT_DETACH
+        /*
+         * Undo any earlier soft detach. Without this the pull-up would stay
+         * dropped and a genuine replug would enumerate nothing at all -- the
+         * cable would be live, the UI would say "connected", and the host
+         * would see silence.
+         */
+        usb_soft_disconnect(false);
+#endif
+
         usb_attach();
         break;
         /* USB_INSERTED: */
@@ -299,6 +309,42 @@ void usb_clear_pending_transfer_completion_events(void)
                          QPEEK_FILTER1(USB_TRANSFER_COMPLETION)));
 #endif
 }
+
+#ifdef HAVE_USB_SOFT_DETACH
+/*
+ * Leave USB mode while the cable stays plugged in.
+ *
+ * The point is to get the device back -- browse, play, use it -- without
+ * giving up the charge, which on a device you cannot open and whose battery
+ * you cannot swap is the difference between "charging" and "unusable while
+ * charging".
+ *
+ * Two halves, and both are needed:
+ *
+ *   The PHY half drops D+ so the host sees a real detach and unmounts the
+ *   volume cleanly, rather than having storage yanked out from under it.
+ *
+ *   The state half posts USB_EXTRACTED so Rockbox unwinds exactly as it does
+ *   for a physical unplug -- including usb_release_exclusive_storage(), which
+ *   remounts the disk for our own use. Faking the event rather than inventing
+ *   a parallel path means there is no second teardown to keep in sync.
+ *
+ * This survives the cable monitor, which is the part that looks like it
+ * should not work: usb_detect() still reports INSERTED afterwards, because
+ * VBUS genuinely is still there. But the monitor only posts on a CHANGE in
+ * status, and from its point of view nothing changed -- so it will not drag
+ * us back into USB mode. A real unplug then a replug goes INSERTED ->
+ * EXTRACTED -> INSERTED, which is a change, and everything resumes normally.
+ */
+void usb_soft_detach(void)
+{
+    if(usb_state != USB_INSERTED)
+        return;
+
+    usb_soft_disconnect(true);
+    queue_post(&usb_queue, USB_EXTRACTED, 0);
+}
+#endif
 
 void usb_signal_notify(long id, intptr_t data)
 {
