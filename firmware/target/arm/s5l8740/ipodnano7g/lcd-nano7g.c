@@ -22,6 +22,7 @@
 #include "system.h"
 #include "lcd.h"
 #include "lcd-target.h"
+#include "boot-beacon.h"
 
 /*
  * ---------------------------------------------------------------------
@@ -183,6 +184,9 @@ void lcd_init_device(void)
     lcdif_program();
     lcdif_run();
     lcd_on = true;
+
+    /* The real driver owns the panel from here. */
+    beacon_stage(BEACON_BLUE);
 }
 
 void lcd_update_rect(int x, int y, int width, int height)

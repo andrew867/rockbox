@@ -50,6 +50,9 @@ int ftl_recover(void);
 
 bool ftl_ready(void);
 
+/* Run the map rebuild on demand (debug menu), not during boot. */
+int ftl_mount_now(void);
+
 /* Resolve an fmss_lba to a physical slot. Returns 0 on success. */
 int ftl_lookup(uint32_t fmss_lba, uint8_t *ce, uint8_t *cau, uint16_t *block,
                uint8_t *page, uint8_t *slot, uint64_t *weave);

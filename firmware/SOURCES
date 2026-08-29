@@ -1682,6 +1682,7 @@ target/arm/s5l8702/ipodnano4g/cscodec-nano4g.c
 
 #ifdef IPOD_NANO7G
 target/arm/s5l8740/system-s5l8740.c
+target/arm/s5l8740/boot-beacon.c
 target/arm/s5l8740/kernel-s5l8740.c
 target/arm/s5l8740/timer-s5l8740.c
 target/arm/s5l8740/gpio-s5l8740.c

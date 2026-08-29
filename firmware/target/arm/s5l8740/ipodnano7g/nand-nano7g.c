@@ -43,15 +43,32 @@ int nand_init(void)
         return 0;   /* no storage, but the firmware still runs */
 
     /*
-     * Mounting means rebuilding the logical-to-physical map by reading what
-     * the device wrote about itself. That is thousands of page reads, so it
-     * is done once here rather than lazily.
+     * The FTL scan is DEFERRED while the port is still being brought up.
+     *
+     * Rebuilding the map means ~16,700 page reads before the UI appears, on a
+     * NAND path that has never run on hardware. If any of it hangs, it hangs
+     * in the middle of boot and looks exactly like a dead firmware -- and on
+     * a device with no serial console there is no way to tell those apart.
+     *
+     * So storage is opt-in for now: everything else has to be seen working
+     * first. Call ftl_mount_now() from the debug menu to run the scan once
+     * there is a screen to watch it on.
      */
-    if (ftl_recover() == 0)
-        storage_ready = true;
-
     last_disk_activity = current_tick;
     return 0;
+}
+
+/*
+ * Run the FTL scan on demand. Separate from nand_init() so a hang here is
+ * something the user chose to trigger, in front of a working UI, rather than
+ * a silent stall three seconds into boot.
+ */
+int ftl_mount_now(void)
+{
+    int ret = ftl_recover();
+
+    storage_ready = (ret == 0);
+    return ret;
 }
 
 void nand_spindown(int seconds)

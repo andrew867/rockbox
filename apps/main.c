@@ -19,6 +19,12 @@
  ****************************************************************************/
 #include "config.h"
 #include "system.h"
+#ifdef IPOD_NANO7G
+#include "boot-beacon.h"
+#define N7G_BEACON(c) beacon_stage(c)
+#else
+#define N7G_BEACON(c) do { } while (0)
+#endif
 
 #include "version.h"
 #include "gcc_extensions.h"
@@ -487,6 +493,14 @@ static void init(void)
     core_allocator_init();
     kernel_init();
 
+    /*
+     * The most informative checkpoint on this target: kernel_init() returning
+     * means the tick timer is firing. Stopping at GREEN without reaching CYAN
+     * means Timer B never delivered its interrupt, and every sleep() in the
+     * firmware is an infinite wait.
+     */
+    N7G_BEACON(BEACON_CYAN);
+
 #if defined(HAVE_BOOTDATA) && !defined(BOOTLOADER)
     verify_boot_data();
 #endif
@@ -510,12 +524,22 @@ static void init(void)
 
     power_init();
 
+    /*
+     * I2C and the PMIC both lean hard on USEC_TIMER for their timeouts, and
+     * Timer E's register offsets are assumed from the s5l8720 layout rather
+     * than confirmed here. If that timer does not count, these two never
+     * return -- and they run before lcd_init(), so the panel would still be
+     * showing U-Boot's logo with no way to tell why.
+     */
+    N7G_BEACON(BEACON_MAGENTA);
+
     enable_irq();
 #if defined(CPU_ARM_CLASSIC)
     enable_fiq();
 #endif
     /* current_tick should be ticking by now */
     CHART("ticking");
+    N7G_BEACON(BEACON_WHITE);
 
     unicode_init();
     lcd_init();

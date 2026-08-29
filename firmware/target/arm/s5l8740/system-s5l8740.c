@@ -21,6 +21,7 @@
 #include "system.h"
 #include "panic.h"
 #include "gpio-s5l8740.h"
+#include "boot-beacon.h"
 #include "clocking-s5l8740.h"
 #include "spi-s5l8740.h"
 #include "pl080.h"
@@ -134,6 +135,17 @@ void memory_init(void)
 
 void system_init(void)
 {
+    /*
+     * FIRST THING, before anything that could block.
+     *
+     * Reaching here proves crt0 ran, the ARMv7-A MMU came up, DRAM works and
+     * we are executing C -- none of which had ever been demonstrated on
+     * silicon. With no serial console, painting the panel is the only way to
+     * say so, and it has to happen before system_init() and kernel_init(),
+     * both of which run ahead of Rockbox's own lcd_init().
+     */
+    beacon_stage(BEACON_RED);
+
     /* Both VICs were disarmed in crt0; set them up properly now. */
     VIC0INTENCLEAR = ~0;
     VIC1INTENCLEAR = ~0;
@@ -148,12 +160,18 @@ void system_init(void)
      * partly RE'd.
      */
     clocking_init();
-
     usec_timer_init();
+
+    /* Clocks and the microsecond timer are programmed. */
+    beacon_stage(BEACON_YELLOW);
+
     gpio_init();
     eic_init();
     pl080_init();
     spi_init();
+
+    /* Everything system_init() owns returned without hanging. */
+    beacon_stage(BEACON_GREEN);
 }
 
 void system_reboot(void)
