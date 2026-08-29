@@ -626,6 +626,14 @@ arm7ejscc () {
 # nothing to gain by rushing it: Rockbox is fixed-point end to end -- codecs,
 # DSP and UI alike -- so soft-float costs nothing measurable here.
 #
+# -mno-unaligned-access, because parts of this port read DMA buffers through
+# an uncached alias. ARMv7 permits unaligned access in Normal memory with
+# SCTLR.A clear, but NOT in Device or Strongly-ordered memory -- and that is
+# exactly what an uncached mapping is. GCC will happily merge consecutive
+# byte loads into one unaligned word load, which is correct everywhere except
+# the buffers this driver reads most, and the result is a data abort with
+# FSR 1 rather than anything that looks like a codegen decision.
+#
 # No -mfpu at all: -mfloat-abi=soft already suppresses FPU codegen, and this
 # toolchain's GCC does not accept -mfpu=none, so naming it would only break
 # the build for no added guarantee.
@@ -634,7 +642,7 @@ arm7ejscc () {
 # mmu-armv7a.S are ARM state.
 cortexa5cc () {
  findarmgcc
- GCCOPTS="$CCOPTS -mcpu=cortex-a5 -marm -mfloat-abi=soft"
+ GCCOPTS="$CCOPTS -mcpu=cortex-a5 -marm -mfloat-abi=soft -mno-unaligned-access"
  GCCOPTIMIZE="-fomit-frame-pointer"
  endian="little"
 }

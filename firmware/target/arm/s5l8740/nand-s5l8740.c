@@ -413,6 +413,7 @@ static int fmss_dma_page_read(unsigned ce, uint32_t addr,
 bool nand_cs_probe_meta0(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
                          struct nand_meta *out)
 {
+    uint8_t meta[NAND_SLOT_META];
     uint32_t addr;
 
     if (!nand_ready || !out)
@@ -429,7 +430,24 @@ bool nand_cs_probe_meta0(uint8_t ce, uint8_t cau, uint16_t block, uint8_t page,
     }
     nand_reset_if_due();
 
-    nand_meta_decode((const uint8_t *)UNCACHED(nand_spare), out);
+    /*
+     * Copy out of the uncached alias before decoding.
+     *
+     * nand_meta_decode() reads its 16 bytes one at a time, but GCC merges the
+     * consecutive byte loads into a single 32-bit load at offset +2 -- which
+     * is unaligned. That is fine in Normal memory, where ARMv7 permits
+     * unaligned access with SCTLR.A clear, and it is NOT fine here: this
+     * buffer is the uncached DMA alias, mapped CACHE_NONE, and unaligned
+     * access to Device or Strongly-ordered memory faults regardless of
+     * SCTLR.A.
+     *
+     * nand_cs_phys_read() never hit this because it memcpy()s each slot into
+     * meta_raw first and decodes from there. This probe decoded in place, and
+     * that one difference is the whole bug: data abort, FSR 1, at
+     * UNCACHED(nand_spare) + 2.
+     */
+    memcpy(meta, (const void *)UNCACHED(nand_spare), NAND_SLOT_META);
+    nand_meta_decode(meta, out);
     return true;
 }
 
