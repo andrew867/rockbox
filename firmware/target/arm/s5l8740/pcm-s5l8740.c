@@ -29,6 +29,7 @@
 #include "clocking-s5l8740.h"
 #include "gpio-s5l8740.h"
 #include "iis-s5l8740.h"
+#include "cs42l81.h"
 
 /*
  * IIS0 @0x3CA00000 -> PL080 DMAC0 peripheral 10 -> CS42L81 on SPI0 -> jack.
@@ -307,6 +308,17 @@ static void sink_play(const void *addr, size_t size)
     iis0_program(cur_rate);
     pcm_dma_arm();
     iis0_tx_kick();
+
+    /*
+     * Only now are BCLK and LRCLK actually running, so this is the first
+     * moment the codec can lock its serial port. Doing it at codec init --
+     * against a dead clock -- completes every register write and achieves
+     * nothing, which is the leading explanation for the Linux silence.
+     */
+#ifdef HAVE_CS42L81
+    if (!cs42l81_asp_is_locked())
+        cs42l81_asp_lock();
+#endif
 }
 
 static void sink_stop(void)

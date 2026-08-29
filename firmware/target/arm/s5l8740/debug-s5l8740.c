@@ -18,6 +18,9 @@
 #include "mikeybus-nano7g.h"
 #include "tristar-nano7g.h"
 #include "spi-s5l8740.h"
+#include "iis-s5l8740.h"
+#include "ftl-s5l8740.h"
+#include "audiohw.h"
 
 /*
  * Deliberately read-only. During bring-up the debug screens are one of the few
@@ -114,6 +117,61 @@ bool dbg_mikeybus(void)
         lcd_putsf(0, line++, "SPI0 fam=%d SPI2 fam=%d",
                   spi_get_status_family(SPI_PORT_CODEC),
                   spi_get_status_family(SPI_PORT_TOUCH));
+
+        lcd_update();
+
+        if (action_userabort(HZ / 5))
+            break;
+    }
+
+    lcd_setfont(FONT_UI);
+    return false;
+}
+
+/*
+ * Audio route and FTL state.
+ *
+ * The route registers are the ones the RE guide names as the readback set for
+ * diagnosing silence, and IIS0 STATUS is the transport's own health: 0x320 or
+ * 0x420 means the interface is running, 0x82A0 meant the wrong parent clock
+ * during the Linux bring-up.
+ */
+bool dbg_audio(void)
+{
+    lcd_setfont(FONT_SYSFIXED);
+
+    while (1) {
+        int line = 0;
+        unsigned rng, mapped, closed, open;
+        unsigned cur, total;
+        const char *phase;
+#ifdef HAVE_CS42L81
+        struct cs42l81_route rt;
+
+        cs42l81_get_route(&rt);
+#endif
+        lcd_clear_display();
+        lcd_putsf(0, line++, "IIS0 STATUS %08lx", (unsigned long)iis0_status());
+        lcd_putsf(0, line++, "(0x320/0x420 = running)");
+        line++;
+
+#ifdef HAVE_CS42L81
+        lcd_putsf(0, line++, "CS42 asp_locked=%d", rt.locked);
+        lcd_putsf(0, line++, "0401=%02x 0403=%02x 0404=%02x",
+                  rt.r0401, rt.r0403, rt.r0404);
+        lcd_putsf(0, line++, "0500=%02x 0527=%02x 054f=%02x",
+                  rt.r0500, rt.r0527, rt.r054f);
+        lcd_putsf(0, line++, "0075=%02x 0220=%02x", rt.r0075, rt.r0220);
+        lcd_putsf(0, line++, "(0527: 60=play ff=mute)");
+#endif
+        line++;
+
+        phase = ftl_progress_phase(&cur, &total);
+        ftl_get_stats(&rng, &mapped, &closed, &open);
+        lcd_putsf(0, line++, "FTL %s %u/%u", phase, cur, total);
+        lcd_putsf(0, line++, "ranges=%u mapped=%u", rng, mapped);
+        lcd_putsf(0, line++, "sb closed=%u open=%u", closed, open);
+        lcd_putsf(0, line++, "fat_base=%u", ftl_fat_base_lba());
 
         lcd_update();
 

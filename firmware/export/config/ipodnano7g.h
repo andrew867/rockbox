@@ -90,14 +90,16 @@
 /*
  * Audio codec: Cirrus CS42L81 / Apple 338S1146 on SPI0 @0x3C300000.
  *
- * The control path is coded in Linux (cs42l81-spi.c) but analog output does
- * not work there yet -- a 1 kHz tone measures about -66 dBFS at the jack
- * against RetailOS's -16 dBFS. Until that is solved, the port declares the
- * dummy codec so the audio stack builds and runs silently rather than
- * pretending to a driver that cannot make sound. Phase 4 swaps this for
- * HAVE_CS42L81 and a real firmware/drivers/audio/cs42l81.c.
+ * Built from the RetailOS RE and live captures rather than ported from the
+ * Linux driver, which is still silent for reasons that are not understood --
+ * copying its structure would risk copying the fault.
+ *
+ * Software volume: the RE establishes that 0x0527 = 0x60 is the stock
+ * playback level and 0xFF is silence, but not the step size in between, and
+ * inventing a dB mapping would be a guess in the one place a guess is
+ * audible.
  */
-#define HAVE_DUMMY_CODEC
+#define HAVE_CS42L81
 /*
  * With no real codec there is no hardware volume control, so volume is
  * applied in software. This also becomes the fallback once cs42l81 lands
