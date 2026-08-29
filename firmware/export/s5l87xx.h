@@ -1791,11 +1791,11 @@ Information for them was gathered solely by reverse-engineering Apple's firmware
 /* Synopsys OTG - S5L8701 only */
 #if CONFIG_CPU==S5L8701
 #define OTGBASE 0x38800000
-#elif CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
+#elif CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720 || CONFIG_CPU==S5L8740
 #define OTGBASE 0x38400000
 #endif
 
-#if CONFIG_CPU==S5L8701 || CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
+#if CONFIG_CPU==S5L8701 || CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720 || CONFIG_CPU==S5L8740
 #define PHYBASE 0x3C400000
 
 /* OTG PHY control registers */
@@ -1812,6 +1812,9 @@ Information for them was gathered solely by reverse-engineering Apple's firmware
 #define USB_NUM_ENDPOINTS 6
 #elif CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
 /* 9 available EPs (0b00000001111101010000000111101011), 6 used */
+#define USB_NUM_ENDPOINTS 6
+#elif CONFIG_CPU==S5L8740
+/* Glass GHWCFG3: 6 IN endpoints, dedicated FIFOs. */
 #define USB_NUM_ENDPOINTS 6
 #endif
 

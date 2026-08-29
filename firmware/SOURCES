@@ -533,6 +533,9 @@ drivers/tuner/si4700.c
 #if (CONFIG_TUNER & IPOD_REMOTE_TUNER)
 drivers/tuner/ipod_remote_tuner.c
 #endif /* (CONFIG_TUNER & IPOD_REMOTE_TUNER) */
+#if (CONFIG_TUNER & BCM2078_TUNER)
+drivers/tuner/bcm2078_tuner.c
+#endif /* (CONFIG_TUNER & BCM2078_TUNER) */
 #if (CONFIG_TUNER & RDA5802)
 drivers/tuner/rda5802.c
 #endif /* (CONFIG_TUNER & RDA5802) */
@@ -1683,6 +1686,8 @@ target/arm/s5l8740/gpio-s5l8740.c
 target/arm/s5l8740/clocking-s5l8740.c
 target/arm/s5l8740/spi-s5l8740.c
 target/arm/s5l8740/pl080.c
+target/arm/s5l8740/iis2-s5l8740.c
+target/arm/s5l8740/bcm2078-s5l8740.c
 target/arm/s5l8740/uart-s5l8740.c
 target/arm/s5l8740/pcm-s5l8740.c
 target/arm/s5l8740/usb-s5l8740.c
@@ -1699,6 +1704,7 @@ target/arm/s5l8740/ipodnano7g/power-nano7g.c
 target/arm/s5l8740/ipodnano7g/nand-nano7g.c
 target/arm/s5l8740/ipodnano7g/accel-nano7g.c
 target/arm/s5l8740/ipodnano7g/tristar-nano7g.c
+target/arm/s5l8740/ipodnano7g/touch-nano7g.c
 #ifndef BOOTLOADER
 target/arm/s5l8740/ipodnano7g/audio-nano7g.c
 #endif

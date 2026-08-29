@@ -25,3 +25,16 @@ void audio_input_mux(int source, unsigned flags)
     (void)source;
     (void)flags;
 }
+
+/*
+ * Output routing. There is only one analog output on this device -- the
+ * headphone jack -- so there is nothing to switch between; USB audio and
+ * normal playback both end up at the same codec.
+ *
+ * TODO: Lightning audio out would be a second sink, but that needs the
+ * Tristar mux map, which is still open RE.
+ */
+void audio_set_output_source(int source)
+{
+    (void)source;
+}

@@ -30,3 +30,17 @@ bool charging_state(void)
 {
     return pmu_is_charging();
 }
+
+#ifdef HAVE_USB_CHARGING_ENABLE
+/*
+ * Called when the host grants a different current budget after enumeration.
+ *
+ * TODO: the D1830 charge-current register is not RE'd yet, so this records
+ * the request without acting on it. Charging still works at whatever rate the
+ * PMIC defaults to -- it simply is not being negotiated up to 500 mA.
+ */
+void usb_charging_maxcurrent_change(int maxcurrent)
+{
+    (void)maxcurrent;
+}
+#endif

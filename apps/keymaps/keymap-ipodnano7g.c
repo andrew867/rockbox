@@ -81,7 +81,7 @@ static const struct button_mapping button_context_yesno[] = {
     LAST_ITEM_IN_LIST__NEXTLIST(CONTEXT_STD)
 }; /* button_context_yesno */
 
-const struct button_mapping* get_context_mapping(int context)
+const struct button_mapping* target_get_context_mapping(int context)
 {
     switch (context & ~CONTEXT_LOCKED)
     {

@@ -47,10 +47,8 @@
 #define HAVE_TAGCACHE
 
 /*
- * The N31 has no clickwheel: navigation is a capacitive touchscreen (TI
- * 343S0538 "Nimbus" on SPI2) plus five physical keys. The touch driver is
- * Phase 6 work and is not wired up yet, so for now the port is driven
- * entirely by the physical keys and HAVE_TOUCHSCREEN stays off.
+ * The N31 has no clickwheel: navigation is the capacitive touchscreen plus
+ * five physical keys (Vol+/-, Home, Sleep, Play).
  */
 #define CONFIG_KEYPAD IPOD_NANO7G_PAD
 
@@ -105,6 +103,29 @@
 /* Define this for LCD backlight available -- MMIO @0x3E000000 */
 #define HAVE_BACKLIGHT
 #define HAVE_BACKLIGHT_BRIGHTNESS
+
+/*
+ * FM radio. Not a tuner chip on a bus: the receiver lives inside the BCM2078
+ * Bluetooth controller and is driven by HCI vendor opcode 0xFC15 over UART1.
+ * Audio comes back as digital PCM on IIS2, not over HCI.
+ */
+#define CONFIG_TUNER BCM2078_TUNER
+#define HAVE_RADIO_REGION
+#define HAVE_FMRADIO_IN
+
+/*
+ * FM audio arrives as digital PCM on IIS2 rather than as an analog line-in,
+ * so the radio counts as a recordable input source even though there is no
+ * ADC in the path.
+ */
+#define INPUT_SRC_CAPS (SRC_CAP_FMRADIO)
+
+/*
+ * Capacitive touchscreen (TI 343S0538 "Nimbus") on SPI2. This is the device's
+ * real navigation surface; the five physical keys supplement it.
+ */
+#define HAVE_TOUCHSCREEN
+#define HAVE_BUTTON_DATA
 
 /* Define this if you have a software controlled poweroff */
 #define HAVE_SW_POWEROFF
@@ -185,11 +206,26 @@
 #define DEFAULT_BRIGHTNESS_SETTING  0x3e
 
 /*
- * USB: DWC2 OTG @0x38400000 behind the PHY @0x3C400000. Phase 6 -- the
- * controller is left alone for now so that the DFU/U-Boot load path is not
- * disturbed mid-boot.
+ * USB: DWC2 OTG @0x38400000 behind the PHY @0x3C400000.
+ *
+ * DESIGNWARE gives this target bulk, interrupt and isochronous transfers, so
+ * the USB stack enables storage, HID, charging-only and -- because of the
+ * isochronous support -- USB audio. With an Apple vendor id it also picks up
+ * the iAP class.
+ *
+ * Mass storage is only useful once the FTL lands (Phase 5); the other modes
+ * work without storage.
  */
-/* #define CONFIG_USBOTG USBOTG_DESIGNWARE */
+#define CONFIG_USBOTG USBOTG_DESIGNWARE
+#define HAVE_USBSTACK
+#define USB_VENDOR_ID 0x05AC
+#define USB_PRODUCT_ID 0x1266
+#define USB_DEVBSS_ATTR __attribute__((aligned(32)))
+#define USB_READ_BUFFER_SIZE (1024*24)
+#define USB_DW_CLOCK 0
+#define USB_DW_TURNAROUND 5
+#define HAVE_USB_CHARGING_ENABLE
+#define HAVE_USB_HID_MOUSE
 
 /* Serial: SEC UART3 @0x3DD00000 is the debug console for the whole port. */
 #define HAVE_SERIAL

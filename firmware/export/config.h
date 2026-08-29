@@ -53,6 +53,7 @@
 #define IPOD_REMOTE_TUNER   0x40 /* Apple */
 #define RDA5802    0x80 /* RDA Microelectronics */
 #define STFM1000   0x100 /* Sigmatel */
+#define BCM2078_TUNER 0x200 /* Broadcom BT+FM combo, driven over HCI */
 
 /* CONFIG_CPU */
 #define MCF5249      5249
