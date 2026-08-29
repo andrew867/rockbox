@@ -539,7 +539,14 @@ static void init(void)
 #endif
     /* current_tick should be ticking by now */
     CHART("ticking");
-    N7G_BEACON(BEACON_PURPLE);
+    /*
+     * Everything from here -- lcd_init() first and hardest -- is built on
+     * USEC_TIMER. Settle whether it counts before trusting it, while the
+     * screen can still report the answer.
+     */
+#ifdef IPOD_NANO7G
+    beacon_probe_usec();
+#endif
 
     unicode_init();
     lcd_init();

@@ -126,6 +126,8 @@ static void lcdif_reset(void)
     CLKCON_08 = clk08 & CLKCON_08_MASK;
     CLKCON_18 = clk18 & CLKCON_18_MASK;
 
+    beacon_split(BEACON_RED, BEACON_BLACK);
+
     N31_LCD_CON &= ~CON_HOLD;
 
     wait_status_clear(N31_LCD_STATUS_RESETTING, RESET_TIMEOUT_US);
@@ -136,6 +138,8 @@ static void lcdif_reset(void)
         if (TIME_AFTER(USEC_TIMER, stop))
             break;              /* reset did not ack -- carry on anyway */
     }
+
+    beacon_split(BEACON_YELLOW, BEACON_BLACK);
 
     /*
      * Poke the hold bit until the interface admits it is held. The stock code
@@ -149,10 +153,14 @@ static void lcdif_reset(void)
         udelay(150);
     }
 
+    beacon_split(BEACON_GREEN, BEACON_BLACK);
+
     N31_LCD_CON &= ~CON_HOLD;
 
     CLKCON_08 = clk08;
     CLKCON_18 = clk18;
+
+    beacon_split(BEACON_CYAN, BEACON_BLACK);
 }
 
 static void lcdif_run(void)
@@ -182,11 +190,21 @@ void lcd_init_device(void)
      */
     lcdif_reset();
     lcdif_program();
+
+    beacon_split(BEACON_WHITE, BEACON_RED);
+
     lcdif_run();
     lcd_on = true;
 
-    /* The real driver owns the panel from here. */
-    beacon_stage(BEACON_BLUE);
+    /*
+     * The real driver owns the panel from here.
+     *
+     * Deliberately NOT solid BLUE, which is what this used to be: main.c
+     * already paints solid BLUE when kernel_init() returns, so the two most
+     * widely separated points in the boot were reporting the same thing. The
+     * split is unambiguous against every solid stage before it.
+     */
+    beacon_split(BEACON_WHITE, BEACON_GREEN);
 }
 
 /*

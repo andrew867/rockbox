@@ -134,3 +134,17 @@ void beacon_split(uint32_t top, uint32_t bottom)
 
     beacon_spin(SPIN_SHORT);
 }
+
+/*
+ * USEC_TIMER liveness. See the comment on the declaration for why this is
+ * worth a dedicated stage rather than being inferred from a hang.
+ */
+void beacon_probe_usec(void)
+{
+    unsigned t0 = USEC_TIMER;
+
+    beacon_spin(SPIN_SHORT);
+
+    beacon_split(BEACON_WHITE,
+                 (USEC_TIMER != t0) ? BEACON_GREEN : BEACON_RED);
+}
