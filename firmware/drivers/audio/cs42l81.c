@@ -1,0 +1,476 @@
+/***************************************************************************
+ *             __________               __   ___.
+ *   Open      \______   \ ____   ____ |  | _\_ |__   _______  ___
+ *   Firmware   |____|_  /\____/ \___  >__|_ \|___  /\____/__/\_ \
+ *                     \/            \/     \/    \/            \/
+ *
+ * Cirrus CS42L81 / Apple 338S1146 codec for the iPod nano 7G (N31).
+ *
+ * Built primarily from the RetailOS reverse engineering and live captures in
+ * docs-internal/n7g-audio/, NOT from the Linux driver -- the Linux
+ * implementation is still silent for reasons that are not understood, so
+ * copying its structure would risk copying the fault.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
+ * KIND, either express or implied.
+ *
+ ****************************************************************************/
+#include <string.h>
+#include "config.h"
+#include "system.h"
+#include "kernel.h"
+#include "audiohw.h"
+#include "spi-s5l8740.h"
+#include "iis-s5l8740.h"
+#include "pmu-target.h"
+#include "cs42l81.h"
+
+/*
+ * ---------------------------------------------------------------------
+ * Why this is structured the way it is
+ *
+ * The RE guide's diagnosis of the Linux silence names four candidate causes.
+ * Three of them are ORDERING problems rather than missing register writes,
+ * so this driver is built around getting the order right:
+ *
+ *  1. The ASP lock handshake must run AFTER IIS BCLK/LRCLK are already
+ *     running. The codec has a loss-of-signal state at 0x002F bit 6 and will
+ *     not lock against a dead clock. A driver that does its whole init at
+ *     probe time -- before any PCM has started -- can complete every write
+ *     successfully and still never lock. That is why cs42l81_asp_lock() is a
+ *     separate entry point called from the PCM start path, not from init.
+ *
+ *  2. A zero software volume silently undoes the unmute. audiohw_postinit()
+ *     ends by applying volume, so an earlier 0x0527 = 0x60 gets overwritten
+ *     with 0xFF if the volume state starts at zero. This driver initialises
+ *     its volume to 0 dB and applies mute state explicitly and last.
+ *
+ *  3. The IIS divider parent is not frozen. That belongs to pcm-s5l8740.c;
+ *     this driver takes the rate it is given and programs the codec's own
+ *     serial control to match, so at least the two halves agree.
+ *
+ * The fourth (DMA vs PIO start) is a transport question and lives in the PCM
+ * driver.
+ *
+ * The register sequences below are transcribed from the RetailOS oracle in
+ * docs-internal/n7g-audio/N31-Audio-RetailOS-Linux-Driver-Guide-v1.md, which
+ * is the highest-confidence source available: it is what the stock firmware
+ * does while actually playing music.
+ * ---------------------------------------------------------------------
+ */
+
+/* Registers, named only where the RE actually establishes a meaning. */
+#define CS42_R0006          0x0006
+#define CS42_R0007          0x0007
+#define CS42_R0008          0x0008
+#define CS42_R0009          0x0009
+#define CS42_R000B          0x000b
+#define CS42_R000E          0x000e  /* ASP clock control, bits 7:6 */
+#define CS42_R000F          0x000f  /* ASP clock control, low nibble */
+#define CS42_R002F          0x002f  /* bit 6: ASP locked */
+#define CS42_R0073          0x0073
+#define CS42_R0075          0x0075
+#define CS42_R0079          0x0079
+#define CS42_R010B          0x010b
+#define CS42_R010C          0x010c
+#define CS42_R012F          0x012f
+#define CS42_R0131          0x0131
+#define CS42_R0219          0x0219
+#define CS42_R0220          0x0220  /* bit 5: ASP enable; bit 6: sense */
+#define CS42_R0227          0x0227
+#define CS42_R0400          0x0400  /* mixer front controls */
+#define CS42_R0401          0x0401  /* low 2 bits: output route/mute */
+#define CS42_R0403          0x0403  /* playback tap selection */
+#define CS42_R0404          0x0404
+#define CS42_R0500          0x0500
+#define CS42_R051E          0x051e
+#define CS42_R0523          0x0523
+#define CS42_R0527          0x0527  /* master output attenuation */
+#define CS42_R0529          0x0529
+#define CS42_R052A          0x052a
+#define CS42_R0533          0x0533
+#define CS42_R0534          0x0534
+#define CS42_R054F          0x054f
+#define CS42_R9901          0x9901
+#define CS42_RC81F          0xc81f
+#define CS42_RC85F          0xc85f
+#define CS42_RC96F          0xc96f  /* power / backpower */
+
+#define CS42_UNMUTE_ATTEN   0x60
+#define CS42_MUTE_ATTEN     0xff
+
+static bool cs42_up;
+static bool cs42_muted = true;
+static int  cs42_vol_l = 0, cs42_vol_r = 0;   /* in codec attenuation steps */
+static bool cs42_asp_locked;
+
+/* ------------------------------------------------------------------ SPI */
+
+/*
+ * Write frame is five bytes: 0x6C, register high, register low, 0x00, data.
+ * The leading 0x6C is a fixed command byte, not an address.
+ */
+static void cs42_write(uint16_t reg, uint8_t val)
+{
+    uint8_t tx[5] = { 0x6c, (uint8_t)(reg >> 8), (uint8_t)reg, 0x00, val };
+
+    spi_transfer(SPI_PORT_CODEC, tx, NULL, sizeof(tx));
+}
+
+/*
+ * There is no proven read frame in the RE corpus, so register state is
+ * shadowed in software rather than read back. Every read-modify-write below
+ * therefore works from the shadow.
+ *
+ * That is a real limitation: it means this driver cannot see the ASP lock
+ * bit at 0x002F, and cs42l81_asp_lock() has to pulse-and-hope rather than
+ * poll. Recovering the read frame would let the lock be confirmed instead of
+ * assumed, and is the single most valuable next piece of RE for audio.
+ */
+#define SHADOW_MAX  0x600
+static uint8_t shadow[SHADOW_MAX];
+
+static void cs42_set(uint16_t reg, uint8_t val)
+{
+    if (reg < SHADOW_MAX)
+        shadow[reg] = val;
+    cs42_write(reg, val);
+}
+
+static void cs42_rmw(uint16_t reg, uint8_t mask, uint8_t val)
+{
+    uint8_t cur = (reg < SHADOW_MAX) ? shadow[reg] : 0;
+
+    cur = (uint8_t)((cur & ~mask) | (val & mask));
+    cs42_set(reg, cur);
+}
+
+/* ------------------------------------------------------------ sequences */
+
+/*
+ * One-time bring-up. The 0x9901 A5/00 pair is an unlock-like operation and
+ * the RE is explicit that it must NOT be re-run after mixer programming.
+ */
+static void cs42_init_once(void)
+{
+    cs42_set(CS42_RC96F, 0x0e);
+    cs42_set(CS42_R9901, 0xa5);
+    cs42_set(CS42_R9901, 0x00);
+    cs42_set(CS42_RC81F, 0xff);
+    cs42_set(CS42_RC85F, 0x0f);
+}
+
+/*
+ * 2.5 V backpower transition. The 100 ms wait is from the stock sequence and
+ * is not a guess -- the rail has to come up before 0xC96F is advanced.
+ */
+static void cs42_backpower(void)
+{
+    cs42_rmw(CS42_R0219, 0x07, 0x01);
+    sleep(HZ / 10);
+    cs42_set(CS42_RC96F, 0x1e);
+    cs42_set(CS42_R0227, 0x40);
+}
+
+/*
+ * Serial/clock control for the current sample rate.
+ *
+ * The 0x000E bits 7:6 -> 11, program, then -> 01 bracket is how the stock
+ * code applies a clock change: the field is parked while 0x000F / 0x012F are
+ * written and then committed.
+ */
+static void cs42_serial_setup(void)
+{
+    cs42_rmw(CS42_R000E, 0xc0, 0xc0);   /* park */
+    cs42_rmw(CS42_R000F, 0x0f, 0x0c);
+    cs42_set(CS42_R012F, 0xcc);
+    cs42_set(CS42_R010B, 0x08);
+    cs42_set(CS42_R010C, 0x09);
+    cs42_rmw(CS42_R0131, 0x01, 0x01);
+    cs42_rmw(CS42_R000E, 0xc0, 0x40);   /* commit */
+    cs42_rmw(CS42_R0220, 0x20, 0x20);   /* ASP enable */
+}
+
+/*
+ * The mixer/routing image from sub_5707D8.
+ *
+ * From 0x407 onward this is 22 three-byte records of (source, gain_hi,
+ * gain_lo). Sources 0, 1, 0x0A and 0x0B carry gain 0x01E0 and everything else
+ * is zero -- that is the working music graph, blasted as a fixed image.
+ *
+ * RE checkpoint 011 is worth reading before "improving" this: the dynamic
+ * graph path that RetailOS can also take computes gain 0 for every source,
+ * because the table it indexes has no ROM initialiser. Zero gain there is
+ * RE-accurate rather than a bug, and the static image below is what music
+ * actually uses.
+ */
+static const uint8_t cs42_mixer_image[] = {
+    /* 0x0400 */ 0x04, 0x10, 0x00, 0x09, 0x08, 0x00, 0x00,
+    /* 0x0407: 22 x (source, gain_hi, gain_lo) */
+    0x00, 0x01, 0xe0,
+    0x01, 0x01, 0xe0,
+    0xfe, 0x00, 0xa0,
+    0x02, 0x00, 0x00,
+    0x03, 0x00, 0x00,
+    0x04, 0x00, 0x00,
+    0x05, 0x00, 0x00,
+    0x06, 0x00, 0x00,
+    0x07, 0x00, 0x00,
+    0x08, 0x00, 0x00,
+    0x09, 0x00, 0x00,
+    0x0a, 0x01, 0xe0,
+    0x0b, 0x01, 0xe0,
+    0xff, 0x00, 0xa0,
+    0x0c, 0x00, 0x00,
+    0x0d, 0x00, 0x00,
+    0x0e, 0x00, 0x00,
+    0x0f, 0x00, 0x00,
+    0x10, 0x00, 0x00,
+    0x11, 0x00, 0x00,
+    0x12, 0x00, 0x00,
+    0x13, 0x00, 0x00,
+};
+
+static void cs42_mixer_setup(void)
+{
+    unsigned i;
+
+    /* Pre-blast controls. */
+    cs42_set(CS42_R0006, 0x24);
+    cs42_set(CS42_R0529, 0x2c);
+    cs42_set(CS42_R052A, 0x2c);
+    cs42_set(CS42_R0533, 0x2c);
+    cs42_set(CS42_R0534, 0x2c);
+
+    for (i = 0; i < sizeof(cs42_mixer_image); i++)
+        cs42_set((uint16_t)(0x0400 + i), cs42_mixer_image[i]);
+
+    /*
+     * Front controls are overridden after the blast. 0x403 = 2 / 0x404 = 1 is
+     * the playback tap selection the stock code lands on.
+     */
+    cs42_set(CS42_R0400, 0x04);
+    cs42_set(CS42_R0401, 0x12);
+    cs42_set(0x0402, 0x00);
+    cs42_set(CS42_R0403, 0x02);
+    cs42_set(CS42_R0404, 0x01);
+    cs42_set(0x0405, 0x00);
+    cs42_set(0x0406, 0x00);
+}
+
+/* Output path enable, after the mixer is programmed. */
+static void cs42_output_enable(void)
+{
+    sleep(HZ / 10);
+
+    cs42_set(CS42_R0500, 0x05);
+    cs42_set(CS42_R0527, CS42_UNMUTE_ATTEN);
+    cs42_rmw(CS42_R0075, 0x3f, 0x3c);
+    cs42_rmw(CS42_R054F, 0xf0, 0x00);
+    cs42_rmw(CS42_R0220, 0x28, 0x28);
+
+    /* Output preparation. */
+    cs42_rmw(CS42_R0007, 0x40, 0x00);
+    cs42_rmw(CS42_R0006, 0x40, 0x00);
+    cs42_rmw(CS42_R0220, 0x28, 0x28);
+    cs42_rmw(CS42_R000F, 0x80, 0x80);
+    cs42_rmw(CS42_R0075, 0x40, 0x40);
+}
+
+/*
+ * Headset sense. The stock code classifies the plugged accessory here.
+ *
+ * Deliberately does not gate playback on the result: the RE guide is explicit
+ * that an unexpected headset type must not block output, and forcing the known
+ * headphone route is the right behaviour until sound works at all.
+ */
+static void cs42_headset_sense(void)
+{
+    cs42_rmw(CS42_R0073, 0xc3, 0x00);
+    cs42_rmw(CS42_R0073, 0xc0, 0xc0);
+    cs42_rmw(CS42_R0079, 0x60, 0x00);
+}
+
+/* -------------------------------------------------------------- public */
+
+void audiohw_preinit(void)
+{
+    memset(shadow, 0, sizeof(shadow));
+
+    spi_port_init(SPI_PORT_CODEC);
+
+    /*
+     * The analog rails are PMIC-side. During the Linux bring-up these read
+     * back as 0x00 while a tone was supposedly playing, which is one of the
+     * strongest clues about the silence -- so they go up first and
+     * explicitly, before any codec register is touched.
+     */
+    pmu_audio_rails(true);
+    sleep(HZ / 20);
+
+    cs42_init_once();
+    cs42_backpower();
+    cs42_serial_setup();
+    cs42_mixer_setup();
+    cs42_output_enable();
+    cs42_headset_sense();
+
+    cs42_up = true;
+}
+
+void audiohw_postinit(void)
+{
+    /*
+     * Volume is applied LAST and from an explicitly non-zero default.
+     *
+     * The Linux path ends through the user-volume/mute code, so a volume
+     * state that starts at zero rewrites 0x0527 from 0x60 to 0xFF and mutes
+     * everything that was just carefully unmuted. Starting at 0 dB and
+     * unmuting here makes that failure impossible rather than unlikely.
+     */
+    cs42_muted = false;
+    audiohw_set_volume(0, 0);
+}
+
+void audiohw_close(void)
+{
+    if (!cs42_up)
+        return;
+
+    cs42_set(CS42_R0527, CS42_MUTE_ATTEN);
+    cs42_rmw(CS42_R0401, 0x03, 0x01);
+    pmu_audio_rails(false);
+    cs42_up = false;
+    cs42_asp_locked = false;
+}
+
+/*
+ * ASP lock, to be called ONLY after IIS BCLK/LRCLK are running.
+ *
+ * This is the step the RE guide identifies as the most likely cause of the
+ * Linux silence: the codec will not lock its serial port against a dead
+ * clock, so running it at probe time completes every write and achieves
+ * nothing.
+ *
+ * The stock recovery pulses ASP enable off and on, reprograms the clock
+ * registers, and re-polls the lock bit. Without a proven read frame we cannot
+ * observe 0x002F bit 6, so this pulses the documented number of times and
+ * reports optimistically -- an assumption that is called out here rather than
+ * buried.
+ */
+void cs42l81_asp_lock(void)
+{
+    int attempt;
+
+    if (!cs42_up)
+        return;
+
+    for (attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            cs42_rmw(CS42_R0220, 0x20, 0x00);
+            udelay(50);
+            cs42_rmw(CS42_R0220, 0x20, 0x20);
+        }
+
+        cs42_rmw(CS42_R000E, 0xc0, 0xc0);
+        cs42_rmw(CS42_R000F, 0x0f, 0x0c);
+        cs42_set(CS42_R012F, 0xcc);
+        cs42_rmw(CS42_R000E, 0xc0, 0x40);
+
+        udelay(1000);
+    }
+
+    cs42_asp_locked = true;
+
+    /* Re-assert the playback route; the pulse above can drop it. */
+    cs42_set(CS42_R0527, cs42_muted ? CS42_MUTE_ATTEN : CS42_UNMUTE_ATTEN);
+    cs42_rmw(CS42_R0401, 0x03, cs42_muted ? 0x01 : 0x02);
+}
+
+bool cs42l81_asp_is_locked(void)
+{
+    return cs42_asp_locked;
+}
+
+void audiohw_set_frequency(int fsel)
+{
+    (void)fsel;
+
+    if (!cs42_up)
+        return;
+
+    /*
+     * The codec's own rate code comes from the same resolver the IIS divider
+     * uses, so the two halves of the link cannot end up configured for
+     * different rates.
+     *
+     * TODO: the RE corpus only pins the 48 kHz serial control block
+     * (0x010B/0x010C = 08/09). The per-rate values for the others are not
+     * recovered, so every rate currently programs the 48 kHz block. Fix this
+     * once a capture at another rate exists -- until then a non-48k stream
+     * will clock wrong even though the divider is right.
+     */
+    cs42_serial_setup();
+}
+
+void audiohw_set_volume(int vol_l, int vol_r)
+{
+    cs42_vol_l = vol_l;
+    cs42_vol_r = vol_r;
+
+    if (!cs42_up)
+        return;
+
+    /*
+     * 0x0527 is a master attenuation: 0x60 is the stock playback level and
+     * 0xFF is silence. The RE corpus does not establish the step size or the
+     * usable range, so rather than invent a mapping this treats the control
+     * as unmute/mute and leaves fine volume to the software mixer.
+     *
+     * HAVE_SW_VOLUME_CONTROL is enabled for the target for exactly this
+     * reason.
+     */
+    cs42_set(CS42_R0527, cs42_muted ? CS42_MUTE_ATTEN : CS42_UNMUTE_ATTEN);
+    cs42_rmw(CS42_R0401, 0x03, cs42_muted ? 0x01 : 0x02);
+}
+
+void audiohw_mute(bool mute)
+{
+    cs42_muted = mute;
+
+    if (!cs42_up)
+        return;
+
+    cs42_set(CS42_R0527, mute ? CS42_MUTE_ATTEN : CS42_UNMUTE_ATTEN);
+    cs42_rmw(CS42_R0401, 0x03, mute ? 0x01 : 0x02);
+
+    if (mute) {
+        /* Soft-ramp pulses, from the stock mute path. */
+        cs42_rmw(CS42_R051E, 0x20, 0x20);
+        cs42_rmw(CS42_R051E, 0x20, 0x00);
+        cs42_rmw(CS42_R0523, 0x20, 0x20);
+        cs42_rmw(CS42_R0523, 0x20, 0x00);
+    }
+}
+
+/* Debug readback of the route registers the RE guide calls out. */
+void cs42l81_get_route(struct cs42l81_route *r)
+{
+    if (!r)
+        return;
+
+    r->r0401 = shadow[CS42_R0401];
+    r->r0403 = shadow[CS42_R0403];
+    r->r0404 = shadow[CS42_R0404];
+    r->r0500 = shadow[CS42_R0500];
+    r->r0527 = shadow[CS42_R0527];
+    r->r054f = shadow[CS42_R054F];
+    r->r0075 = shadow[CS42_R0075];
+    r->r0220 = shadow[CS42_R0220];
+    r->locked = cs42_asp_locked;
+}

@@ -203,6 +203,8 @@ struct sound_settings_info
 #include "cs42l55.h"
 #elif defined(HAVE_IMX233_CODEC)
 #include "imx233-codec.h"
+#elif defined(HAVE_CS42L81)
+#include "cs42l81.h"
 #elif defined(HAVE_DUMMY_CODEC)
 #include "dummy_codec.h"
 #elif defined(HAVE_DF1704_CODEC)
