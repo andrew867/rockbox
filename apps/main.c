@@ -271,6 +271,7 @@ int main(void)
     validate_start_directory_init();
     /* no calls INIT_ATTR functions after this point anymore!
      * see definition of INIT_ATTR in config.h */
+    N7G_MARK(BEACON_WHITE);
     CHART(">root_menu");
     root_menu();
 }
@@ -712,6 +713,7 @@ static void init(void)
 
     if (!mounted)
     {
+        N7G_MARK(BEACON_CYAN);
         CHART(">disk_mount_all");
         rc = disk_mount_all();
         CHART("<disk_mount_all");
@@ -778,6 +780,7 @@ static void init(void)
     pcm_init();
     dsp_init();
 
+    N7G_MARK(BEACON_BLUE);
     CHART(">settings_load");
     settings_load();
     CHART("<settings_load");
@@ -804,6 +807,7 @@ static void init(void)
     init_battery_tables();
     CHART("<init_battery_tables");
 #ifdef HAVE_DIRCACHE
+    N7G_MARK(BEACON_MAGENTA);
     CHART(">init_dircache(true)");
     rc = init_dircache(true);
     CHART("<init_dircache(true)");
@@ -822,6 +826,7 @@ static void init(void)
     CHART("<init_dircache(false)");
 #endif
 #ifdef HAVE_TAGCACHE
+    N7G_MARK(BEACON_ORANGE);
     CHART(">init_tagcache");
     init_tagcache();
     CHART("<init_tagcache");

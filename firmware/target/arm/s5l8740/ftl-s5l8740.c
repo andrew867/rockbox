@@ -589,10 +589,29 @@ static bool find_fat_base(void)
 #define PROG_LINE_H     12
 #define PROG_LINE0_Y    4
 
+/*
+ * Repaint only when the bar would actually look different.
+ *
+ * Every repaint is a full 103,680-pixel frame -- see lcd_update_rect() -- so
+ * painting once per PROG_EVERY units would add minutes to a mount to redraw
+ * pixels that did not change. Quantising to PROG_STEPS caps it at a few dozen
+ * frames per phase, which is smooth to look at and costs under a second.
+ */
+#define PROG_STEPS      40
+
 static void ftl_progress_paint(void)
 {
+    static unsigned last_step = ~0u;
+    static const char *last_phase;
     char buf[48];
     unsigned filled = 0;
+    unsigned step;
+
+    step = prog_total ? (prog_cur * PROG_STEPS / prog_total) : 0;
+    if (step == last_step && prog_phase == last_phase)
+        return;
+    last_step = step;
+    last_phase = prog_phase;
 
     /*
      * Clear only our band, and do it by drawing background rather than

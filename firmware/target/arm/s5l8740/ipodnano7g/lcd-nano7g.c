@@ -34,8 +34,12 @@
  *
  * That is deliberate for now -- it is the only path proven to put pixels on
  * the panel, and a DMA/accelerated replacement is being developed separately.
- * lcd_update_rect() is written so that only the dirty rectangle is pushed,
- * which is what makes the UI tolerable until the fast path lands.
+ *
+ * And it is ALWAYS a full frame. lcd_update_rect() used to push only the
+ * dirty rectangle, which seemed obviously right and is not possible here:
+ * LCD_WDATA is a sequential stream with no addressing, so a partial push
+ * leaves the panel pointer mid-screen and the next one starts from there.
+ * See lcd_update_rect() for what that looked like.
  *
  * When the DMA driver arrives, lcd_update_rect() is the only function that
  * should need to change.
@@ -287,33 +291,50 @@ static inline uint32_t n31_rgb565_to_xrgb8888(unsigned p)
     return (r << 16) | (g << 8) | b;
 }
 
+/*
+ * There is no partial update on this interface.
+ *
+ * LCD_WDATA is a sequential stream, not an addressed write. Nothing here
+ * programs a column or row window -- the panel simply consumes pixels in
+ * order and advances its own pointer. Push fewer than a full frame and the
+ * pointer is left mid-screen, so the NEXT push starts wherever the last one
+ * stopped.
+ *
+ * That produced a very legible bug: a progress display repainting a 240x80
+ * band walked steadily down the screen, one band per repaint, and eventually
+ * wrapped -- the top of the panel showing what should have been the bottom.
+ * It looked like a drawing bug and no amount of fixing the coordinates
+ * touched it, because the drawing was always right and the push was wrong.
+ * The boot beacons never showed it precisely because they always pushed whole
+ * frames.
+ *
+ * So the rectangle is advisory: callers may pass one, and the whole frame
+ * goes out regardless. The Linux driver does the same and for the same
+ * reason -- it flushes the entire plane on every damage event.
+ *
+ * The cost is real. A frame is 240 x 432 = 103,680 poll-and-store pairs, so
+ * anything repainting in a loop should throttle itself rather than assume a
+ * small rectangle is cheap. It is not cheap; it is a full frame wearing a
+ * smaller argument.
+ *
+ * TODO: the DMA path removes this. Until then, correctness first.
+ */
 void lcd_update_rect(int x, int y, int width, int height)
 {
     const fb_data *fb = FBADDR(0, 0);
     int px, py;
 
+    (void)x; (void)y; (void)width; (void)height;
+
     if (!lcd_on)
         return;
 
-    if (x < 0) { width += x; x = 0; }
-    if (y < 0) { height += y; y = 0; }
-    if (x + width > LCD_WIDTH)
-        width = LCD_WIDTH - x;
-    if (y + height > LCD_HEIGHT)
-        height = LCD_HEIGHT - y;
-    if (width <= 0 || height <= 0)
-        return;
-
-    for (py = y; py < y + height; py++) {
+    for (py = 0; py < LCD_HEIGHT; py++) {
         const fb_data *row = fb + py * LCD_WIDTH;
 
-        for (px = x; px < x + width; px++) {
+        for (px = 0; px < LCD_WIDTH; px++) {
             unsigned spin = PIXEL_TIMEOUT_US;
 
-            /*
-             * One poll and one store per pixel. See the warning at the top
-             * of this file -- this is the slow path by construction.
-             */
             while (N31_LCD_STATUS & N31_LCD_STATUS_BUSY) {
                 if (--spin == 0)
                     return;     /* interface wedged; give up on this frame */
