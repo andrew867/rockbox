@@ -56,6 +56,13 @@ bool mount_done;
  */
 void n31_trace(const char *tag)
 {
+    /*
+     * Prove entry before touching the display. If ORANGE (before the call)
+     * appears and this CYAN does not, the hang is the call itself; if both
+     * appear and no text follows, the LCD path is what is stuck.
+     */
+    beacon_stage(BEACON_CYAN);
+
     lcd_clear_display();
     lcd_putsxy(4, 4,  "N7G disk");
     lcd_putsxy(4, 20, tag);

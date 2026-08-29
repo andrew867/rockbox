@@ -758,6 +758,18 @@ static void init(void)
     {
         N7G_STAGE("disk_mount_all");
         CHART(">disk_mount_all");
+        /*
+         * Beacon, not text. The stage marker above paints fine and the trace
+         * inside disk_mount_all() never appears, and the only thing those two
+         * have in common is the LCD driver -- viewport, font, framebuffer,
+         * full-frame push. So this checkpoint deliberately uses none of it:
+         * beacon_stage() is raw MMIO with a bounded spin and no dependency on
+         * anything the C display path needs.
+         *
+         * ORANGE here and CYAN at the top of n31_trace bracket the only gap
+         * left.
+         */
+        N7G_BEACON(BEACON_ORANGE);
         rc = disk_mount_all();
         CHART("<disk_mount_all");
         /*
