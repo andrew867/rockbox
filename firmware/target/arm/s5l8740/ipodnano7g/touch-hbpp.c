@@ -72,12 +72,50 @@
 #define EXEC_SETTLE_MS      40
 
 #define FW_PATH             "/.rockbox/grape-nimbus.bin"
-#define CAL_PATH            "/.rockbox/grape-nimbus-cal.bin"
+
+/*
+ * Calibration is per-device and does NOT come from a file.
+ *
+ * It arrives through the A34 IsyS handoff: a 0x560-byte SysCfg object whose
+ * magic is "IsyS", with the 512-byte calibration window at decimal offset
+ * 350. U-Boot copies that object into reserved DRAM -- the same page the
+ * Linux device tree reserves as n31-isys@9dff000 -- so it is readable here
+ * without a device tree of our own.
+ *
+ * The RE is explicit that the alternatives are all wrong: there is no
+ * grape-nimbus-cal.bin, no FTL IsyS scan, and it is NOT GrapeFirmware.bin
+ * +350. Shipping a cal file was this driver's own invention.
+ */
+#define ISYS_ADDR           0x09DFF000u
+#define ISYS_MAGIC          0x53797349u     /* "IsyS" */
+#define ISYS_LEN            0x560u
+#define ISYS_CAL_OFF        350u
+
+static bool cal_loaded;
 
 /* One chunk plus its envelope. */
 static uint8_t hbpp_tx[HBPP_CHUNK_MAX + HBPP_HDR_LEN];
 static uint8_t hbpp_rx[HBPP_CHUNK_MAX + HBPP_HDR_LEN];
 static uint8_t hbpp_src[HBPP_CHUNK_MAX];
+
+/*
+ * Every 32-bit word byte-reversed (sub_273A0). Applied to the calibration
+ * window before it is packetised -- which is a different transform from the
+ * B1 B0 B3 B2 wire swizzle every DATA packet gets, and both are needed.
+ */
+static void bswap32_words(uint8_t *p, unsigned len)
+{
+    unsigned i;
+
+    for (i = 0; i + 3 < len; i += 4) {
+        uint8_t t0 = p[i], t1 = p[i + 1];
+
+        p[i]     = p[i + 3];
+        p[i + 1] = p[i + 2];
+        p[i + 2] = t1;
+        p[i + 3] = t0;
+    }
+}
 
 static uint16_t sum16(const uint8_t *p, unsigned len)
 {
@@ -249,6 +287,79 @@ static int hbpp_exec(uint32_t word0, uint32_t word1)
     return spi_transfer(SPI_PORT_TOUCH, tx, rx, sizeof(tx));
 }
 
+/*
+ * MT_SPI_Z2_WAKE (opcode 0xEE). A 16-byte frame whose reply is discarded.
+ *
+ * It is sent for its effect, not its answer: the part is asleep until it
+ * sees this, and a download issued to a sleeping controller goes nowhere.
+ */
+static void hbpp_wake(void)
+{
+    uint8_t tx[16] = { 0 };
+    uint8_t rx[16] = { 0 };
+
+    tx[0] = 0xee;
+    tx[14] = 0xee;
+
+    spi_transfer(SPI_PORT_TOUCH, tx, rx, sizeof(tx));
+}
+
+/*
+ * Post-download probe (sub_26494, reached from sub_20E94): a 16-byte 1A A1
+ * frame padded with 18 E1 pairs. The stock code rejects the part only when
+ * the transfer SUCCEEDS and returns two words it does not recognise -- a
+ * failed transfer is not a verdict.
+ *
+ * Returns false only for that specific "answered with nonsense" case.
+ */
+static bool opcode_known(uint16_t w)
+{
+    return w == 0x18e1 || w == 0x1aa1 || w == 0x1f01 || w == 0x19c1 ||
+           w == 0x4879 || w == 0x4bc1 || w == 0x4969 || w == 0x4ad1;
+}
+
+static bool hbpp_probe_26494(void)
+{
+    uint8_t tx[16];
+    uint8_t rx[16] = { 0 };
+    unsigned i;
+    uint16_t w0, w1;
+
+    tx[0] = 0x1a;
+    tx[1] = 0xa1;
+    for (i = 2; i < sizeof(tx); i += 2) {
+        tx[i] = 0x18;
+        tx[i + 1] = 0xe1;
+    }
+
+    if (spi_transfer(SPI_PORT_TOUCH, tx, rx, sizeof(tx)) < 0)
+        return true;    /* transfer trouble is not a verdict on the part */
+
+    w0 = (uint16_t)((rx[0] << 8) | rx[1]);
+    w1 = (uint16_t)((rx[2] << 8) | rx[3]);
+
+    return opcode_known(w0) && opcode_known(w1);
+}
+
+/*
+ * Upload the per-device calibration window out of the IsyS object U-Boot
+ * left in reserved DRAM. Optional: without it the controller still runs, it
+ * is simply uncalibrated, and that beats refusing to bring touch up.
+ */
+static bool hbpp_upload_cal(void)
+{
+    const uint32_t *isys = (const uint32_t *)ISYS_ADDR;
+    static uint8_t cal[CAL_LEN];
+
+    if (isys[0] != ISYS_MAGIC)
+        return false;   /* no handoff from the previous stage */
+
+    memcpy(cal, (const uint8_t *)ISYS_ADDR + ISYS_CAL_OFF, CAL_LEN);
+    bswap32_words(cal, CAL_LEN);
+
+    return hbpp_send_chunk(CAL_DEST, cal, CAL_LEN) == 0;
+}
+
 /* Upload one file in chunks, starting at `dest`. */
 static int hbpp_upload_file(const char *path, uint32_t dest, unsigned chunk_max)
 {
@@ -303,6 +414,10 @@ int touch_hbpp_load(void)
     enter[0] = (uint8_t)(HBPP_ENTER >> 8);
     enter[1] = (uint8_t)HBPP_ENTER;
 
+    /* Wake the part before anything else; a sleeping controller ignores us. */
+    hbpp_wake();
+    sleep(HZ / 100);
+
     if (spi_transfer(SPI_PORT_TOUCH, enter, NULL, sizeof(enter)) < 0)
         return TOUCH_HBPP_ERR_BUS;
 
@@ -318,12 +433,16 @@ int touch_hbpp_load(void)
         return TOUCH_HBPP_ERR_UPLOAD;
     }
 
+    /* Per-device calibration, from the IsyS handoff. Optional. */
+    cal_loaded = hbpp_upload_cal();
+
     /*
-     * Calibration is per-device and lives beside the firmware. It is optional
-     * here: without it the controller still runs, it is just not calibrated,
-     * which is a far better outcome than refusing to bring touch up at all.
+     * sub_20E94: probe after the download and before EXEC. The result is
+     * checked but a bus problem is not treated as a verdict -- the stock code
+     * only gives up when the part answers with words it does not recognise.
      */
-    hbpp_upload_file(CAL_PATH, CAL_DEST, CAL_LEN);
+    if (!hbpp_probe_26494())
+        return TOUCH_HBPP_ERR_UPLOAD;
 
     if (hbpp_exec(EXEC_WORD0, EXEC_WORD1) < 0)
         return TOUCH_HBPP_ERR_EXEC;
@@ -335,4 +454,9 @@ int touch_hbpp_load(void)
     sleep((HZ * EXEC_SETTLE_MS) / 1000 + 1);
 
     return TOUCH_HBPP_OK;
+}
+
+bool touch_cal_loaded(void)
+{
+    return cal_loaded;
 }

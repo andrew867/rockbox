@@ -248,6 +248,13 @@ static void pcm_dma_arm(void)
  */
 static void iis0_tx_kick(void)
 {
+    /*
+     * The stock start path reads TXCOM before writing it. Kept as a read even
+     * though the value is not used: on this block a read-then-write is not
+     * the same bus activity as a bare write, and the RE records the order.
+     */
+    (void)IIS_REG(IIS0_BASE, I2STXCOM);
+
     IIS_REG(IIS0_BASE, I2STXCOM) = I2STXCOM_PIO;
     IIS_REG(IIS0_BASE, I2STXCOM) = I2STXCOM_DMA;
 }

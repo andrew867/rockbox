@@ -88,6 +88,7 @@
 #define CS42_R0219          0x0219
 #define CS42_R0220          0x0220  /* bit 5: ASP enable; bit 6: sense */
 #define CS42_R0227          0x0227
+#define CS42_R0528          0x0528  /* mixer readback, 570620/5707D8 */
 #define CS42_R0400          0x0400  /* mixer front controls */
 #define CS42_R0401          0x0401  /* low 2 bits: output route/mute */
 #define CS42_R0403          0x0403  /* playback tap selection */
@@ -114,6 +115,7 @@ static bool cs42_muted = true;
 static int  cs42_vol_l = 0, cs42_vol_r = 0;   /* in codec attenuation steps */
 static bool cs42_asp_locked;
 static unsigned int cs42_rate = 44100;
+static uint8_t cs42_headset_type;   /* 0x000B & 3; telemetry only */
 
 /* ------------------------------------------------------------------ SPI */
 
@@ -179,6 +181,14 @@ static void cs42_rmw(uint16_t reg, uint8_t mask, uint8_t val)
  */
 static void cs42_init_once(void)
 {
+    /*
+     * The stock sequence reads 0x0227 before touching anything, and the
+     * result is never used. Kept anyway: a read is a bus transaction the
+     * part sees, and dropping "useless" reads is a good way to skip a
+     * handshake or leave a latch set. Cheap to keep, expensive to debug.
+     */
+    (void)cs42_read(CS42_R0227);
+
     cs42_set(CS42_RC96F, 0x0e);
     cs42_set(CS42_R9901, 0xa5);
     cs42_set(CS42_R9901, 0x00);
@@ -319,6 +329,9 @@ static void cs42_mixer_setup(void)
     cs42_set(CS42_R0404, 0x01);
     cs42_set(0x0405, 0x00);
     cs42_set(0x0406, 0x00);
+
+    /* Both 5707D8 and 570620 read 0x0528 back at this point. */
+    (void)cs42_read(CS42_R0528);
 }
 
 /* Output path enable, after the mixer is programmed. */
@@ -349,9 +362,49 @@ static void cs42_output_enable(void)
  */
 static void cs42_headset_sense(void)
 {
+    uint8_t old220;
+    int i;
+
     cs42_rmw(CS42_R0073, 0xc3, 0x00);
     cs42_rmw(CS42_R0073, 0xc0, 0xc0);
     cs42_rmw(CS42_R0079, 0x60, 0x00);
+
+    /*
+     * Temporary detection mode. The whole block was previously missing --
+     * only the three RMWs above were done -- on the reasoning that we force
+     * the headphone route anyway and do not need the answer.
+     *
+     * That reasoning is wrong. This is a sequence the codec runs, not a query
+     * we opt into: it enters detection mode, waits for the comparator, reads
+     * the result, and leaves detection mode again. Skipping it leaves 0x0220
+     * bit 6 and 0x0009 in whatever state they happened to be in, which is not
+     * the state the rest of the stock sequence assumes.
+     *
+     * The result is still deliberately not acted on -- an unexpected headset
+     * type must never block playback -- but the sequence runs.
+     */
+    old220 = cs42_read(CS42_R0220);
+
+    cs42_rmw(CS42_R0220, 0x40, 0x40);
+    udelay(1000);
+
+    cs42_rmw(CS42_R0009, 0xc0, 0xc0);
+
+    for (i = 0; i < 3; i++) {
+        udelay(1000);
+        if (cs42_read(CS42_R002F) & 0x40)
+            break;
+    }
+
+    /* headset type = 0x000B & 3; recorded, not enforced. */
+    cs42_headset_type = cs42_read(CS42_R000B) & 3;
+
+    cs42_rmw(CS42_R0009, 0xc0, 0x80);
+    cs42_rmw(CS42_R0220, 0x40, old220 & 0x40);
+
+    /* Two more reads the stock path ends on, results unused. */
+    (void)cs42_read(CS42_R0008);
+    (void)cs42_read(CS42_R0009);
 }
 
 /* -------------------------------------------------------------- public */
@@ -554,5 +607,6 @@ void cs42l81_get_route(struct cs42l81_route *r)
     r->r0075 = cs42_read(CS42_R0075);
     r->r0220 = cs42_read(CS42_R0220);
     r->r002f = cs42_read(CS42_R002F);
+    r->headset_type = cs42_headset_type;
     r->locked = cs42_asp_locked;
 }

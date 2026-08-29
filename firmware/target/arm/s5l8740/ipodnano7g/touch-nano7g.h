@@ -41,6 +41,9 @@ bool touch_available(void);
 uint16_t touch_bootloader_status(void);
 unsigned touch_ping_failures(void);
 
+/* True when per-device calibration was found in the IsyS handoff. */
+bool touch_cal_loaded(void);
+
 /*
  * Poll the controller. Returns BUTTON_TOUCHSCREEN with *x / *y filled when a
  * finger is down, or 0 otherwise.
