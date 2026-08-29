@@ -43,6 +43,9 @@ static bool storage_ready;
 /* Cleared until the volume is mounted; gates the boot-time read counter. */
 bool mount_done;
 
+/* Points at the trace counter while the mount is running; NULL after. */
+static unsigned *mount_fails;
+
 int nand_init(void)
 {
     if (!ftl_init())
@@ -217,26 +220,55 @@ int nand_read_sectors(IF_MD(int drive,) unsigned long start, int count,
      * Every 2048 reads, because a repaint is a full 103,680-pixel frame.
      * Temporary, and it comes out with the stage markers.
      */
+    /*
+     * Live read trace during the mount.
+     *
+     * The first attempt printed every 2048 reads and never printed at all,
+     * which was itself the finding: the mount wedges in fewer reads than
+     * that. A mount only needs a few hundred, so the interval was coarser
+     * than the thing it was measuring.
+     *
+     * Every one of the first 64 reads is shown with its sector, then every
+     * 256. That distinguishes the three cases this has been stuck between:
+     * a sector that never returns (the number stops on it), FAT looping over
+     * a small set (the same sector repeats), and a slow but progressing mount
+     * (the number climbs).
+     *
+     * Failures are counted separately -- nand_read_sectors() returns -1 for
+     * an unmapped LBA, and a caller retrying that forever looks exactly like
+     * a hang from out here.
+     */
     if (!mount_done) {
-        static unsigned reads;
+        static unsigned reads, fails;
         char buf[40];
 
-        if ((++reads % 2048) == 0) {
-            snprintf(buf, sizeof(buf), "disk reads %u", reads);
+        reads++;
+
+        if (reads <= 64 || (reads % 256) == 0) {
             lcd_clear_display();
-            lcd_putsxy(4, 4, "N7G stage");
+            lcd_putsxy(4, 4,  "N7G stage");
             lcd_putsxy(4, 20, "disk_mount_all");
+            snprintf(buf, sizeof(buf), "rd %u  n %d", reads, count);
             lcd_putsxy(4, 36, buf);
+            snprintf(buf, sizeof(buf), "lba %lu", (unsigned long)start);
+            lcd_putsxy(4, 52, buf);
+            snprintf(buf, sizeof(buf), "fail %u", fails);
+            lcd_putsxy(4, 68, buf);
             lcd_update();
         }
+
+        mount_fails = &fails;
     }
 
     last_disk_activity = current_tick;
 
     for (i = 0; i < count; i++) {
         if (ftl_read_disk_lba((uint32_t)(start + i),
-                              out + (size_t)i * NAND_FTL_SECTOR_SIZE))
+                              out + (size_t)i * NAND_FTL_SECTOR_SIZE)) {
+            if (mount_fails)
+                (*mount_fails)++;
             return -1;
+        }
     }
 
     return 0;
