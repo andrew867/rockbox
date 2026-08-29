@@ -36,6 +36,9 @@
 #elif CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
 #define CACHEALIGN_BITS (5)  /* 2^5 = 32 bytes */
 #define CACHEALIGN_SIZE (32)
+#elif CONFIG_CPU==S5L8740
+#define CACHEALIGN_BITS (5)  /* Cortex-A5 L1 line = 32 bytes */
+#define CACHEALIGN_SIZE (32)
 #endif
 
 #if CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
@@ -58,6 +61,129 @@
 #define TTB_SIZE        0x4000
 #define TTB_BASE_ADDR   (DRAM_ORIG + DRAM_SIZE - TTB_SIZE)
 #endif
+
+#if CONFIG_CPU==S5L8740
+/*
+ * N31 / iPod nano 7G. DRAM base and size are confirmed on glass
+ * (s5l8740-n31.dts memory@8000000, 64 MiB).
+ *
+ * The SEC IRAM at 0x22000000 is only 128 KiB and the DFU ROM and U-Boot both
+ * live in it, so unlike the s5l8702 targets this port does not relocate
+ * .icode/.iram/.stack there -- everything runs from DRAM. IRAM_ORIG is
+ * defined for completeness and for later use by a bootloader build.
+ */
+#define DRAM_ORIG 0x08000000
+#define IRAM_ORIG 0x22000000
+
+#define IRAM0_ORIG  IRAM_ORIG
+#define IRAM0_SIZE  0x20000
+#define IRAM1_ORIG  (IRAM0_ORIG + IRAM0_SIZE)
+#define IRAM1_SIZE  0x0
+
+#define DRAM_SIZE   (MEMORYSIZE * 0x100000)
+#define IRAM_SIZE   (IRAM0_SIZE + IRAM1_SIZE)
+
+/* 16 KB of 1 MB section descriptors, parked at the very top of DRAM. */
+#define TTB_SIZE        0x4000
+#define TTB_BASE_ADDR   (DRAM_ORIG + DRAM_SIZE - TTB_SIZE)
+
+/*
+ * ---------------------------------------------------------------------
+ * S5L8740 / N31 MMIO map
+ *
+ * Transcribed from tools/linux-n31/s5l8740-n31.dts, which is the RE'd and
+ * partly glass-proven map for this SoC. The register blocks below are named
+ * the way the DT nodes are, so the two can be diffed by eye.
+ *
+ * Confidence follows the project rule: only values marked CONFIRMED in
+ * docs-internal/N31-LINUX-ROCKBOX-DRIVER-NOTES.md are hard-coded here.
+ * ---------------------------------------------------------------------
+ */
+#define SHA1_BASE       0x38000000
+#define DMAC0_BASE      0x38200000  /* PL080 */
+#define LCDIF_BASE      0x38300000
+#define USB_OTG_BASE    0x38400000  /* DWC2 */
+#define DMAC1_BASE      0x38700000  /* PL080 */
+#define FMC_BASE        0x38A00000  /* NAND FMC/FMSS */
+#define AES_BASE        0x38C00000
+#define VIC0_BASE       0x38E00000  /* PL192 */
+#define VIC1_BASE       0x38E01000  /* PL192 */
+#define EIC_BASE        0x39700000  /* GPIO -> VIC expander */
+#define PRNG_BASE       0x3C100000
+#define SPI0_BASE       0x3C300000  /* CS42L81 codec control */
+#define USB_PHY_BASE    0x3C400000
+#define CLKCON_BASE     0x3C500000
+#define IIC0_BASE       0x3C600000
+#define TIMER_BASE_N31  0x3C700000
+#define WDT_BASE        0x3C800000
+#define IIC1_BASE       0x3C900000  /* PMIC 0x73, LIS3 0x18, Tristar 0x1a */
+#define IIS0_BASE       0x3CA00000
+#define UART0_BASE      0x3CC00000
+#define GPIO_BASE       0x3CF00000
+#define SPI2_BASE       0x3D200000  /* Nimbus touchscreen */
+#define IIS2_BASE       0x3D400000  /* BCM2078 PCM / FM capture */
+#define UART1_BASE      0x3DB00000  /* BCM2078 Bluetooth */
+#define UART2_BASE      0x3DC00000  /* MikeyBus */
+#define UART3_BASE      0x3DD00000  /* SEC UART -- debug console */
+#define BACKLIGHT_BASE  0x3E000000
+
+/*
+ * GPIO. Bank stride 32, eight 4-bit function nibbles per bank in PCON.
+ * This is NOT the s5l8702 group model -- see gpio-s5l8740.c.
+ */
+#define GPIO_BANK_STRIDE    32
+#define GPIO_PCON(b)    (*(REG32_PTR_T)(GPIO_BASE + GPIO_BANK_STRIDE*(b) + 0x00))
+#define GPIO_PDAT(b)    (*(REG32_PTR_T)(GPIO_BASE + GPIO_BANK_STRIDE*(b) + 0x04))
+#define GPIO_POUT(b)    (*(REG32_PTR_T)(GPIO_BASE + GPIO_BANK_STRIDE*(b) + 0x08))
+#define GPIO_PINEN(b)   (*(REG32_PTR_T)(GPIO_BASE + GPIO_BANK_STRIDE*(b) + 0x0c))
+#define GPIO_PUNK10(b)  (*(REG32_PTR_T)(GPIO_BASE + GPIO_BANK_STRIDE*(b) + 0x10))
+#define GPIO_PDIR(b)    (*(REG32_PTR_T)(GPIO_BASE + GPIO_BANK_STRIDE*(b) + 0x14))
+/* Write (bank << 16) | (pin << 8) | mode to latch a pad change. */
+#define GPIO_CMD        (*(REG32_PTR_T)(GPIO_BASE + 0x1e0))
+
+#define GPIO_NPADS      256
+
+/* Board pads, from the DT and OSOS pad ids. */
+#define GPIO_PAD_NIMBUS_EN      14
+#define GPIO_PAD_NIMBUS_IRQ     38
+#define GPIO_PAD_NIMBUS_RST     39
+#define GPIO_PAD_VOLUP          40  /* OSOS id 8 */
+#define GPIO_PAD_VOLDOWN        41  /* OSOS id 7 */
+#define GPIO_PAD_MIKEY_A        66
+#define GPIO_PAD_MIKEY_B        67
+#define GPIO_PAD_BT_POWER       70
+#define GPIO_PAD_IIC1_SCL       78
+#define GPIO_PAD_IIC1_SDA       79
+#define GPIO_PAD_PMIC_IRQ       86
+#define GPIO_PAD_FM_PCM0        97
+#define GPIO_PAD_FM_PCM1        98
+#define GPIO_PAD_FM_PCM2        119
+
+/*
+ * PL192 VIC. Two controllers; the EIC funnels GPIO groups into them.
+ *   EIC group 1 (GPIO 32-63, volume keys) -> VIC1 line 0
+ *   EIC group 2 (GPIO 64-95, PMIC nIRQ)   -> VIC0 line 31
+ * Measured by toggling each group's INTEN and watching RAWINTR.
+ */
+#define IRQ_TIMER       7
+#define IRQ_DMAC0       16
+#define IRQ_DMAC1       17
+#define IRQ_USB_OTG     19
+#define IRQ_IIC0        21
+#define IRQ_IIC1        22
+#define IRQ_UART0       24
+#define IRQ_UART1       25
+#define IRQ_UART2       26
+#define IRQ_UART3       27
+#define IRQ_EIC_GROUP2  31
+#define IRQ_EIC_GROUP1  (32 + 0)
+
+/* I2C slave addresses (7-bit, as Linux states them). */
+#define I2C_ADDR_PMIC       0x73    /* Dialog D1830 / 338S1099, on IIC1 */
+#define I2C_ADDR_ACCEL      0x18    /* LIS331DLH, on IIC1 */
+#define I2C_ADDR_TRISTAR    0x1a    /* NXP CBTL1609A1, on IIC1 */
+
+#endif /* CONFIG_CPU==S5L8740 */
 
 /* Base address of the memory-mapped I/O */
 #define IO_BASE 0x38000000
@@ -792,7 +918,7 @@
 
 #define FIVE_USEC_TIMER         (((uint64_t)TICNTH << 32) | TICNTL)
 #define USEC_TIMER              (FIVE_USEC_TIMER * 5)
-#elif CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
+#elif CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720 || CONFIG_CPU==S5L8740
 /*
  * 16/32-bit timers:
  *
@@ -834,7 +960,18 @@
  *    Ext. Clock 1: 32768 Hz, external OSC1
  *    ECLK: 12 MHz, external OSC0
  */
+/*
+ * TODO (S5L8740): ECLK is 24 MHz on N31 (device tree "nclk"), not 12 MHz,
+ * and the Timer E offsets below are assumed identical to s5l8720 rather
+ * than confirmed by RE. kernel-s5l8740.c programs its own dividers from
+ * 24 MHz; verify TECNT actually counts at 1 MHz on glass before trusting
+ * udelay().
+ */
+#if CONFIG_CPU == S5L8740
+#define TIMER_FREQ  24000000    /* ECLK */
+#else
 #define TIMER_FREQ  12000000    /* ECLK */
+#endif
 
 #define TECON        (*((REG32_PTR_T)(TIMER_BASE + 0xA0)))
 #define TECMD        (*((REG32_PTR_T)(TIMER_BASE + 0xA4)))
@@ -1690,8 +1827,10 @@ Information for them was gathered solely by reverse-engineering Apple's firmware
 // #define USB_DW_ARCH_SLAVE
 #endif
 
-#if CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
+#if CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720 || CONFIG_CPU==S5L8740
 /////INTERRUPT CONTROLLERS/////
+/* Same PL192 pair at the same base on all three SoCs. The IRQ *numbers*
+   below differ per SoC, so that part is guarded separately. */
 #define VIC_BASE   0x38E00000
 #define VIC_OFFSET 0x1000
 
@@ -1880,7 +2019,9 @@ Information for them was gathered solely by reverse-engineering Apple's firmware
 #define VIC1EDGE0             (*((REG32_PTR_T)(VICBASE(2) + 0x04)))
 #define VIC0EDGE1             (*((REG32_PTR_T)(VICBASE(2) + 0x08)))     // TBC: INTENCLEAR
 #define VIC1EDGE1             (*((REG32_PTR_T)(VICBASE(2) + 0x0C)))
+#endif /* VIC registers */
 
+#if CONFIG_CPU==S5L8702 || CONFIG_CPU==S5L8720
 /////INTERRUPTS/////
 // #define IRQ_UNK5        5
 #define IRQ_TIMER32     7
