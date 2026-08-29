@@ -32,6 +32,37 @@
  * s5l8702 crt0 has no equivalent here.
  */
 
+/*
+ * Assembly beacon.
+ *
+ * Paints the panel using nothing but registers and MMIO stores: no stack, no
+ * C runtime, no MMU, no timer, no interrupts. That matters because every one
+ * of those is a candidate for the thing being hunted -- a beacon that needed
+ * any of them could not report its own failure.
+ *
+ * U-Boot leaves the LCDIF running and the panel lit, so pushing pixels is
+ * enough; no reprogramming is required just to change the colour.
+ *
+ * Clobbers r0-r3. Safe before bss is cleared and before stacks exist.
+ */
+    .macro  BEACON colour
+    ldr     r0, =0x38300000         /* LCDIF base */
+    ldr     r1, =\colour
+    ldr     r2, =(240 * 432)        /* one full frame */
+9998:
+    mov     r3, #4096               /* bounded busy-wait, never infinite */
+9999:
+    ldr     r12, [r0, #0x1c]        /* LCD_STATUS */
+    tst     r12, #0x10              /* BUSY */
+    beq     9997f
+    subs    r3, r3, #1
+    bne     9999b
+9997:
+    str     r1, [r0, #0x40]         /* LCD_WDATA */
+    subs    r2, r2, #1
+    bne     9998b
+    .endm
+
     .section .intvect,"ax",%progbits
     .global    start
     .global    _newstart
@@ -49,6 +80,16 @@ start:
 
 _newstart:
     msr     cpsr_c, #0xd3           /* supervisor mode, IRQ/FIQ off */
+
+    /*
+     * WHITE: the bootloader actually branched to us.
+     *
+     * This is the single fact that was missing when the first attempt did
+     * nothing: a silent panel could mean the image never ran OR that it ran
+     * and died instantly, and there was no way to tell those apart. Anything
+     * other than U-Boot's logo from here on means we are executing.
+     */
+    BEACON 0xffff
 
     /*
      * U-Boot hands over with the MMU and caches on and its own page tables
@@ -109,6 +150,15 @@ _newstart:
      * ordered. See mmu-armv7a.S and system-s5l8740.c:set_page_tables().
      */
     bl      memory_init
+
+    /*
+     * RED: memory_init() returned. With the MMU enabled that means the
+     * ARMv7-A page tables and enable_mmu() both worked -- the part of this
+     * port that had never run on silicon at all. If the panel goes white and
+     * stops, the MMU is where it died; build with N31_NO_MMU to take that
+     * out of the picture entirely.
+     */
+    BEACON 0xf800
 
     /* Set up stack for IRQ mode */
     msr     cpsr_c, #0xd2

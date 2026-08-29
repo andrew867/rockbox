@@ -121,6 +121,27 @@ static void set_page_tables(void)
      */
     map_section(IO_BASE, IO_BASE, 0x80, CACHE_NONE);
 
+    /*
+     * SEC IRAM, uncached and 1:1.
+     *
+     * We do not use it -- this port runs entirely from DRAM -- but the DFU
+     * ROM and the earlier boot stages do, and their setup is not something we
+     * can decompile. Leaving the window unmapped means any pointer they left
+     * behind faults the moment the MMU comes on, which would look like the
+     * firmware dying instantly for no visible reason.
+     *
+     * Mapping a region we never touch costs two page-table entries. Not
+     * mapping it costs a boot that fails in a way nothing can report.
+     */
+    map_section(IRAM_ORIG, IRAM_ORIG, 2, CACHE_NONE);
+
+    /*
+     * The low 128 MB, uncached and 1:1, for the same reason: whatever the
+     * bootloader parked below DRAM stays reachable rather than becoming a
+     * fault. Cheap insurance while nothing about this boot is proven.
+     */
+    map_section(0x00000000, 0x00000000, 128, CACHE_NONE);
+
     /* Uncached alias of DRAM for DMA. */
     map_section(DRAM_ORIG, (uintptr_t)S5L8740_UNCACHED_ADDR(DRAM_ORIG),
                 MEMORYSIZE, CACHE_NONE);
@@ -128,9 +149,23 @@ static void set_page_tables(void)
 
 void memory_init(void)
 {
+    /*
+     * The MMU can be left off entirely during bring-up.
+     *
+     * With it off, DRAM and every peripheral are reachable 1:1 and nothing
+     * the earlier boot stages did can be lost to a missing mapping -- at the
+     * cost of running uncached, which is slow but correct. The ARMv7-A MMU
+     * path has never executed on this silicon, so being able to take it out
+     * of the picture in one define is worth having while the first boot is
+     * still being chased.
+     */
+#ifdef N31_NO_MMU
+    (void)set_page_tables;
+#else
     ttb_init();
     set_page_tables();
     enable_mmu();
+#endif
 }
 
 void system_init(void)
