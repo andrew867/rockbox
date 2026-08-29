@@ -44,4 +44,17 @@ void spi_port_init(int port);
  */
 int spi_transfer(int port, const uint8_t *tx, uint8_t *rx, int len);
 
+/*
+ * As spi_transfer(), but able to leave chip select asserted when the frame
+ * continues into the next call. Some protocols here frame on CS rather than
+ * on length -- the Nimbus HBPP upload in particular -- and dropping CS
+ * mid-frame silently splits it in two.
+ */
+int spi_transfer_cs(int port, const uint8_t *tx, uint8_t *rx, int len,
+                    bool release_cs);
+
+/* Diagnostics: which status encoding was latched, and the timeout counters. */
+int  spi_get_status_family(int port);
+void spi_get_timeouts(int port, unsigned *tx, unsigned *rx);
+
 #endif /* __SPI_S5L8740_H__ */

@@ -40,9 +40,38 @@
 /* sub_4043D0 writes 1 here after every TX word. */
 #define SPIUNK4C    0x4c
 
-#define SPISTATUS_TXBUSY    0x7c0
-#define SPISTATUS_RXRDY     0xf800
-#define SPISTATUS_KICK      0x400000
+/*
+ * Status encodings.
+ *
+ * This engine has been seen reporting completion in either of two ways,
+ * depending on which init path ran:
+ *
+ *   ROS      TX busy 0x7C0 -> 0,   RX ready 0xF800 nonzero
+ *   CLASSIC  TX level 0x1F0 -> 0,  RX level 0x3E00 nonzero
+ *
+ * This driver originally waited on the ROS masks and then, on timeout,
+ * accepted the CLASSIC masks as a fallback. That is a correctness hazard
+ * rather than merely a slow path: the masks OVERLAP -- 0x7C0 and 0x1F0 share
+ * bits 6-8, 0xF800 and 0x3E00 share bits 11-13 -- so the wrong family's test
+ * can read as satisfied while the transfer is still in flight. RXDATA is then
+ * sampled early and returns the FIFO's previous contents. That does not look
+ * like noise, because it is not noise: it is the same stale word every time,
+ * which is exactly the repeating 0x4f81 pattern seen on SPI2.
+ *
+ * So the encoding is a per-instance property. While unlatched, both families
+ * are polled in ONE loop and whichever genuinely satisfies first is latched.
+ * After that only the latched family is consulted, and a timeout is a real
+ * timeout rather than a cue to try the other interpretation.
+ */
+#define SPISTATUS_TXBUSY_ROS    0x7c0
+#define SPISTATUS_RXRDY_ROS     0xf800
+#define SPISTATUS_TXLVL_CLASSIC 0x1f0
+#define SPISTATUS_RXLVL_CLASSIC 0x3e00
+/* Stays set after the sub_11B70 setup; idle for ROS purposes. */
+#define SPISTATUS_TXBUSY_RESIDUE 0x40
+#define SPISTATUS_TXFULL        0x100
+
+#define SPISTATUS_KICK          0x400000
 
 #define SPISETUP_RXMODE     (1 << 0)
 /* mode 0x1A from sub_11B70 -> 0x402E | 0x10. NOT 0x403C, a different mode. */
@@ -55,6 +84,23 @@
 
 #define SPI_WAIT_GUARD      500000
 
+enum spi_family {
+    SPI_FAM_AUTO = 0,
+    SPI_FAM_ROS,
+    SPI_FAM_CLASSIC,
+};
+
+struct spi_port_state {
+    enum spi_family fam;
+    bool            cs_held;
+    unsigned        tx_timeouts;
+    unsigned        rx_timeouts;
+};
+
+/* Indexed by port number; only 0 and 2 are wired on this board. */
+static struct spi_port_state spi_state[3];
+static struct mutex spi_mtx[3];
+
 static uint32_t spi_base(int port)
 {
     return (port == SPI_PORT_TOUCH) ? SPI2_BASE : SPI0_BASE;
@@ -62,63 +108,70 @@ static uint32_t spi_base(int port)
 
 #define SPI_REG(port, off)  (*(REG32_PTR_T)(spi_base(port) + (off)))
 
-static struct mutex spi_mtx[3];
-
-/*
- * Both waits accept the Rockbox Classic status encodings as a fallback. The
- * two families report TX-empty and RX-ready in different bits, and the N31
- * engine has been observed using each depending on which setup path ran.
- */
-static int spi_wait_clear(int port, uint32_t mask)
+static void spi_latch_fam(int port, enum spi_family f)
 {
-    unsigned guard = SPI_WAIT_GUARD;
-
-    while (guard--) {
-        if ((SPI_REG(port, SPISTATUS) & mask) == 0)
-            return 0;
-    }
-
-    if (mask == SPISTATUS_TXBUSY) {
-        guard = SPI_WAIT_GUARD / 4;
-        while (guard--) {
-            if ((SPI_REG(port, SPISTATUS) & 0x1f0) == 0)
-                return 0;
-        }
-    }
-    return -1;
-}
-
-static int spi_wait_set(int port, uint32_t mask)
-{
-    unsigned guard = SPI_WAIT_GUARD;
-
-    while (guard--) {
-        if (SPI_REG(port, SPISTATUS) & mask)
-            return 0;
-    }
-
-    if (mask == SPISTATUS_RXRDY) {
-        guard = SPI_WAIT_GUARD / 4;
-        while (guard--) {
-            if (SPI_REG(port, SPISTATUS) & 0x3e00)
-                return 0;
-        }
-    }
-    return -1;
+    spi_state[port].fam = f;
 }
 
 /*
- * After the sub_11B70 setup, STATUS bit 6 (0x40) stays set and the 0x7C0 mask
- * never reaches zero. Treat that exact residue as "not busy" rather than
- * timing out on every single transfer.
+ * Wait for the transmit side to go idle.
+ *
+ * Only the latched family is consulted. While still AUTO both are polled in
+ * the same loop, so the first genuine completion decides rather than one
+ * family getting a full guard interval of head start.
  */
 static int spi_wait_tx_idle(int port)
 {
-    int ret = spi_wait_clear(port, SPISTATUS_TXBUSY);
+    unsigned guard = SPI_WAIT_GUARD;
+    enum spi_family fam = spi_state[port].fam;
 
-    if (ret && (SPI_REG(port, SPISTATUS) & SPISTATUS_TXBUSY) == 0x40)
-        ret = 0;
-    return ret;
+    while (guard--) {
+        uint32_t st = SPI_REG(port, SPISTATUS);
+
+        if (fam != SPI_FAM_CLASSIC) {
+            uint32_t b = st & SPISTATUS_TXBUSY_ROS;
+
+            if (b == 0 || b == SPISTATUS_TXBUSY_RESIDUE) {
+                spi_latch_fam(port, SPI_FAM_ROS);
+                return 0;
+            }
+        }
+        if (fam != SPI_FAM_ROS && (st & SPISTATUS_TXLVL_CLASSIC) == 0) {
+            spi_latch_fam(port, SPI_FAM_CLASSIC);
+            return 0;
+        }
+    }
+
+    spi_state[port].tx_timeouts++;
+    return -1;
+}
+
+/* Wait for received data to actually be available. Same latching rule. */
+static int spi_wait_rx_ready(int port)
+{
+    unsigned guard = SPI_WAIT_GUARD;
+    enum spi_family fam = spi_state[port].fam;
+
+    while (guard--) {
+        uint32_t st = SPI_REG(port, SPISTATUS);
+
+        if (fam != SPI_FAM_CLASSIC && (st & SPISTATUS_RXRDY_ROS)) {
+            spi_latch_fam(port, SPI_FAM_ROS);
+            return 0;
+        }
+        if (fam != SPI_FAM_ROS && (st & SPISTATUS_RXLVL_CLASSIC)) {
+            spi_latch_fam(port, SPI_FAM_CLASSIC);
+            return 0;
+        }
+    }
+
+    /*
+     * A receive timeout is an error and propagates. Reading RXDATA anyway
+     * would hand the caller the FIFO's previous contents as if it were a
+     * reply -- the exact bug this driver used to have.
+     */
+    spi_state[port].rx_timeouts++;
+    return -1;
 }
 
 static void spi_cs(int port, bool assert)
@@ -182,6 +235,14 @@ static void spi_engine_init(int port, unsigned a4, uint32_t u3c)
 
 void spi_port_init(int port)
 {
+    /*
+     * Re-measure the status encoding after any re-init: which family the
+     * engine reports in depends on the init path that ran, so a latch from
+     * before a re-setup is not necessarily still true.
+     */
+    spi_state[port].fam = SPI_FAM_AUTO;
+    spi_state[port].cs_held = false;
+
     if (port == SPI_PORT_CODEC) {
         /* PWRCON1 SPI0 plus the companion gate in PWRCON4. */
         clockgate_enable(CLKCON_PWRCON1, PWRCON1_SPI0, true);
@@ -219,21 +280,29 @@ void spi_init(void)
 }
 
 /* RetailOS sub_4043D0. */
-static int spi_transfer_locked(int port, const uint8_t *tx, uint8_t *rx, int len)
+static int spi_transfer_locked(int port, const uint8_t *tx, uint8_t *rx,
+                               int len, bool assert_cs, bool deassert_cs)
 {
     int i;
     int ret;
 
-    spi_cs(port, true);
+    if (assert_cs)
+        spi_cs(port, true);
+    spi_state[port].cs_held = true;
 
     SPI_REG(port, SPICTRL) |= SPICTRL_RESET_FIFO;
 
     ret = spi_wait_tx_idle(port);
     if (ret)
         goto out;
-    ret = spi_wait_clear(port, SPISTATUS_RXRDY);
-    if (ret)
-        goto out;
+
+    /*
+     * Drain anything the FIFO is still holding before the real transfer, so
+     * a stale word cannot be mistaken for this transfer's first reply.
+     */
+    while (SPI_REG(port, SPISTATUS) &
+           (SPISTATUS_RXRDY_ROS | SPISTATUS_RXLVL_CLASSIC))
+        (void)SPI_REG(port, SPIRXDATA);
 
     /*
      * TX present  -> clear RXMODE, then kick with STATUS bit 22.
@@ -248,23 +317,32 @@ static int spi_transfer_locked(int port, const uint8_t *tx, uint8_t *rx, int len
     }
 
     for (i = 0; i < len; i++) {
-        /* RXLIMIT is only armed when the caller actually wants data back. */
-        SPI_REG(port, SPIRXLIMIT) = rx ? 1 : 0;
+        /*
+         * RXLIMIT is armed for every word, not only when the caller wants
+         * data. The part clocks a reply out regardless, and leaving it
+         * undrained overruns the RX FIFO partway through a long burst --
+         * which silently loses everything after the header.
+         */
+        SPI_REG(port, SPIRXLIMIT) = 1;
 
         ret = spi_wait_tx_idle(port);
         if (ret)
             break;
 
-        if (tx) {
-            SPI_REG(port, SPITXDATA) = tx[i];
+        /* TXDATA is byte wide; a wider write only puts the low byte out. */
+        SPI_REG(port, SPITXDATA) = tx ? tx[i] : 0xff;
+        if (tx)
             SPI_REG(port, SPIUNK4C) = 1;
-        }
 
-        if (rx) {
-            ret = spi_wait_set(port, SPISTATUS_RXRDY);
-            if (ret)
-                break;
-            rx[i] = (uint8_t)SPI_REG(port, SPIRXDATA);
+        ret = spi_wait_rx_ready(port);
+        if (ret)
+            break;
+
+        {
+            uint8_t b = (uint8_t)SPI_REG(port, SPIRXDATA);
+
+            if (rx)
+                rx[i] = b;
         }
     }
 
@@ -275,11 +353,34 @@ static int spi_transfer_locked(int port, const uint8_t *tx, uint8_t *rx, int len
     SPI_REG(port, SPISETUP) &= ~0x400001u;
 
 out:
-    spi_cs(port, false);
+    /*
+     * Always drop CS on error. Leaving it asserted after a timeout would
+     * strand the bus for every later transfer.
+     */
+    if (deassert_cs || ret) {
+        spi_cs(port, false);
+        spi_state[port].cs_held = false;
+    }
+
     return ret;
 }
 
 int spi_transfer(int port, const uint8_t *tx, uint8_t *rx, int len)
+{
+    return spi_transfer_cs(port, tx, rx, len, true);
+}
+
+/*
+ * Chip-select-aware variant.
+ *
+ * Some protocols on this bus frame on chip select rather than on length --
+ * the Nimbus HBPP upload is the one that matters -- so a caller has to be
+ * able to hold CS down across several calls. Dropping CS between them
+ * silently splits one frame into several, and the part simply stops
+ * acknowledging.
+ */
+int spi_transfer_cs(int port, const uint8_t *tx, uint8_t *rx, int len,
+                    bool release_cs)
 {
     int ret;
 
@@ -287,7 +388,21 @@ int spi_transfer(int port, const uint8_t *tx, uint8_t *rx, int len)
         return -1;
 
     mutex_lock(&spi_mtx[port]);
-    ret = spi_transfer_locked(port, tx, rx, len);
+    ret = spi_transfer_locked(port, tx, rx, len,
+                              !spi_state[port].cs_held, release_cs);
     mutex_unlock(&spi_mtx[port]);
     return ret;
+}
+
+int spi_get_status_family(int port)
+{
+    return (int)spi_state[port].fam;
+}
+
+void spi_get_timeouts(int port, unsigned *tx, unsigned *rx)
+{
+    if (tx)
+        *tx = spi_state[port].tx_timeouts;
+    if (rx)
+        *rx = spi_state[port].rx_timeouts;
 }
