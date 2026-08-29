@@ -158,6 +158,7 @@
 #define CTRU_PAD           78
 #define HIBY_R3PROII_PAD   79
 #define HIDIZS_AP80MAX_PAD 80
+#define IPOD_NANO7G_PAD    81
 
 /* CONFIG_REMOTE_KEYPAD */
 #define H100_REMOTE   1
@@ -274,6 +275,7 @@
 #define LCD_SHANLING_Q1   70 /* as used by the Shanling Q1 */
 #define LCD_EROSQ         71 /* as used by the ErosQ (native) */
 #define LCD_ECHO_R1       72 /* ILI9342, as used by the Echo R1 */
+#define LCD_S5L8740       73 /* S5L8740 LCDIF, as used by the iPod nano 7G */
 
 /* LCD_PIXELFORMAT */
 #define HORIZONTAL_PACKING 1
@@ -309,6 +311,7 @@ Lyre prototype 1 */
 #define I2C_JZ47XX  14 /* Ingenic Jz47XX style */
 #define I2C_AS3525  15
 #define I2C_S5L8702 16 /* Same as S5L8700, but with two channels */
+#define I2C_S5L8740 17 /* S5L8740, polled, IRQPEND byte-done */
 #define I2C_IMX233  17
 #define I2C_RK27XX  18
 #define I2C_X1000   19
@@ -409,6 +412,8 @@ Lyre prototype 1 */
 #include "config/ipodnano3g.h"
 #elif defined(IPOD_NANO4G)
 #include "config/ipodnano4g.h"
+#elif defined(IPOD_NANO7G)
+#include "config/ipodnano7g.h"
 #elif defined(IPOD_6G)
 #include "config/ipod6g.h"
 #elif defined(GIGABEAT_F)
@@ -1149,8 +1154,10 @@ Lyre prototype 1 */
 /* Core, plugins, and codecs for straightforward targets */
 #if defined(CPU_COLDFIRE) || \
     defined(CPU_PP) || \
-    defined(CPU_S5L87XX) || \
+    (defined(CPU_S5L87XX) && (CONFIG_CPU != S5L8740)) || \
     (CONFIG_CPU == TCC7801)
+/* S5L8740 (iPod nano 7G) is excluded: its 128 KB SEC IRAM is shared with
+   the DFU ROM and U-Boot, so that port runs entirely from its 64 MB DRAM. */
 # define USE_IRAM
 
 /* AS3525 +2MB: core, plugins, codecs */
