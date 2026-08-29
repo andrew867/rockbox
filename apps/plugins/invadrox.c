@@ -175,7 +175,7 @@
 #define RIGHT BUTTON_NEXT
 #define FIRE BUTTON_PLAY
 
-#elif CONFIG_KEYPAD == ONDAVX747_PAD || \
+#elif (CONFIG_KEYPAD == ONDAVX747_PAD || CONFIG_KEYPAD == IPOD_NANO7G_PAD) || \
 CONFIG_KEYPAD == ONDAVX777_PAD || \
 CONFIG_KEYPAD == MROBE500_PAD
 
@@ -610,7 +610,8 @@ CONFIG_KEYPAD == MROBE500_PAD
 #define MAX_Y 18
 
 
-#elif (LCD_WIDTH == 240) && ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400))
+#elif (LCD_WIDTH == 240) && ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400) \
+                          || (LCD_HEIGHT == 432))
 
 /* Gigabeat: 240x320x16
  * ======================

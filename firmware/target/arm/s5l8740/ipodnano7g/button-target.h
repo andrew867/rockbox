@@ -49,6 +49,17 @@
 #define BUTTON_BOTTOMMIDDLE 0x00001000
 #define BUTTON_BOTTOMRIGHT  0x00002000
 
+/*
+ * Directional aliases onto the touchscreen grid, the same idiom ondavx747
+ * uses. Plugins are full of generic code that expects BUTTON_UP/DOWN/LEFT/
+ * RIGHT to exist; without these every one of them needs a bespoke block, and
+ * with them most just work.
+ */
+#define BUTTON_LEFT         BUTTON_MIDLEFT
+#define BUTTON_RIGHT        BUTTON_MIDRIGHT
+#define BUTTON_UP           BUTTON_TOPMIDDLE
+#define BUTTON_DOWN         BUTTON_BOTTOMMIDDLE
+
 #define BUTTON_MAIN (BUTTON_VOL_UP    | BUTTON_VOL_DOWN    | BUTTON_HOME       | \
                      BUTTON_POWER     | BUTTON_PLAY        | BUTTON_TOPLEFT    | \
                      BUTTON_TOPMIDDLE | BUTTON_TOPRIGHT    | BUTTON_MIDLEFT    | \

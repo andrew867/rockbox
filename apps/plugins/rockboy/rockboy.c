@@ -253,6 +253,11 @@ static void setoptions (void)
         options.B       = BUTTON_VOL_DOWN;
         options.MENU    = BUTTON_MENU;
 
+#elif CONFIG_KEYPAD == IPOD_NANO7G_PAD
+        options.A       = BUTTON_VOL_UP;
+        options.B       = BUTTON_VOL_DOWN;
+        options.MENU    = BUTTON_HOME;
+
 #elif CONFIG_KEYPAD == ONDAVX777_PAD
         options.MENU    = BUTTON_POWER;
 

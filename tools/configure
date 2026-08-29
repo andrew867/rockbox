@@ -2698,10 +2698,7 @@ fi
     bmp2rb_native="$rootdir/tools/bmp2rb -f 4"
     output="rockbox.ipod"
     appextra="recorder:gui:radio"
-    # Plugins are off until the port has a settled keymap: every game carries
-    # its own per-keypad #ifdef ladder, and adding IPOD_NANO7G_PAD to all of
-    # them before the touchscreen driver exists would only have to be redone.
-    plugins="no"
+    plugins="yes"
     bootoutput="bootloader-$modelname.ipod"
     # toolset is the tools within the tools directory that we build for
     # this particular target.

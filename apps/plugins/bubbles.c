@@ -171,7 +171,8 @@ enum {
 #define NEXT_BB_Y       200
 
 /* 22x22 bubbles (Gigabeat, Onda VX747) */
-#elif ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400)) && (LCD_WIDTH == 240)
+#elif ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400) || (LCD_HEIGHT == 432)) \
+      && (LCD_WIDTH == 240)
 #define XOFS          64
 #define MAX_FPS       30
 

@@ -173,6 +173,9 @@ dir is the current direction of the snake - 0=up, 1=right, 2=down, 3=left;
 #elif (CONFIG_KEYPAD == ONDAVX747_PAD)
 #define SNAKE_QUIT BUTTON_POWER
 
+#elif CONFIG_KEYPAD == IPOD_NANO7G_PAD
+#define SNAKE_QUIT BUTTON_POWER
+
 #elif (CONFIG_KEYPAD == ONDAVX777_PAD)
 #define SNAKE_QUIT BUTTON_POWER
 

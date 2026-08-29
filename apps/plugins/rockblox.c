@@ -244,6 +244,9 @@
 #elif CONFIG_KEYPAD == ONDAVX747_PAD
 #define ROCKBLOX_OFF           BUTTON_POWER
 #define ROCKBLOX_RESTART       BUTTON_MENU
+#elif CONFIG_KEYPAD == IPOD_NANO7G_PAD
+#define ROCKBLOX_OFF           BUTTON_POWER
+#define ROCKBLOX_RESTART       BUTTON_HOME
 #elif CONFIG_KEYPAD == ONDAVX777_PAD
 #define ROCKBLOX_OFF           BUTTON_POWER
 
@@ -622,7 +625,8 @@
 #define LEVEL_Y 70
 #define LINES_Y 105
 
-#elif (LCD_WIDTH == 240) && ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400))
+#elif (LCD_WIDTH == 240) && ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400) \
+                          || (LCD_HEIGHT == 432))
 
 #define BLOCK_WIDTH 15
 #define BLOCK_HEIGHT 15

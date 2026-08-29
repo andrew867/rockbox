@@ -214,7 +214,7 @@ static long max_cycle;
 #define BTN_QUIT BUTTON_POWER
 #define BTN_STOPRESET BUTTON_RIGHT
 
-#elif (CONFIG_KEYPAD == ONDAVX747_PAD) || \
+#elif ((CONFIG_KEYPAD == ONDAVX747_PAD || CONFIG_KEYPAD == IPOD_NANO7G_PAD)) || \
 (CONFIG_KEYPAD == ONDAVX777_PAD) || \
 CONFIG_KEYPAD == MROBE500_PAD
 
@@ -524,7 +524,8 @@ CONFIG_KEYPAD == MROBE500_PAD
 #define MAX_WORM_SEGMENTS 512
 #elif ((LCD_WIDTH == 240) && (LCD_HEIGHT == 240)) || \
     ((LCD_WIDTH == 320) && (LCD_HEIGHT == 240)) || \
-    ((LCD_WIDTH == 240) && ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400))) || \
+    ((LCD_WIDTH == 240) && ((LCD_HEIGHT == 320) || (LCD_HEIGHT == 400) || \
+                            (LCD_HEIGHT == 432))) || \
     ((LCD_WIDTH == 360) && ((LCD_HEIGHT == 400) || (LCD_HEIGHT == 640)))
 #define FOOD_SIZE 7
 #define ARGH_SIZE 8

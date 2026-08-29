@@ -314,6 +314,11 @@
 #define STAR_QUIT           BUTTON_POWER
 #define STAR_QUIT_NAME      "POWER"
 
+#elif CONFIG_KEYPAD == IPOD_NANO7G_PAD
+
+#define STAR_QUIT           BUTTON_POWER
+#define STAR_QUIT_NAME      "POWER"
+
 #elif (CONFIG_KEYPAD == ONDAVX777_PAD)
 #define STAR_QUIT           BUTTON_POWER
 #define STAR_QUIT_NAME      "POWER"
