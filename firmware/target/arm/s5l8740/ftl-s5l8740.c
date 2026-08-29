@@ -121,7 +121,9 @@ static unsigned stat_mapped;
 static unsigned stat_probe_empty;
 static unsigned stat_cxt_oob;       /* extents pointing outside the device */
 static unsigned stat_cxt_self;      /* extents inside a context superblock */
+static unsigned stat_cxt_hole;      /* extents the context marks as free space */
 static unsigned stat_skipped;       /* closed SBs the checkpoint already covers */
+static unsigned stat_btoc_fallback; /* closed SBs whose BTOC parsed to nothing */
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
@@ -763,6 +765,22 @@ static void ftl_progress_paint(void)
 #define CXT_TAG_END         255
 #define CXT_CONTIG_SPAN     0xfffffff0u
 
+/*
+ * Free space, not a broken address.
+ *
+ * The context marks unmapped extents with this sentinel. It is far above any
+ * real VBA, so a plain range check rejects it -- correctly, but it then counts
+ * as an out-of-range drop, which reads like the map losing data it should
+ * have kept. On this volume that is 609 records covering ~2.96M LBAs of a
+ * 3.86M-sector device: a quarter-full disk, exactly as expected, and nothing
+ * missing at all.
+ *
+ * Counting it separately is the whole point. An out-of-range drop is a bug
+ * worth chasing; a hole is the disk saying it is empty there, and conflating
+ * the two sends you looking for data that was never written.
+ */
+#define CXT_VBA_HOLE        0x007fffffu
+
 #define CXT_MAX_SB          32
 
 /*
@@ -914,7 +932,9 @@ static int cxt_load_l2v(const uint8_t *d, uint64_t weave)
          * Dropping is sometimes right (CXT VBAs are context records, not user
          * data), but it must never be invisible.
          */
-        if (vba >= VBA_LIMIT)
+        if (vba == CXT_VBA_HOLE)
+            stat_cxt_hole++;
+        else if (vba >= VBA_LIMIT)
             stat_cxt_oob++;
         else if (vba_is_cxt(vba))
             stat_cxt_self++;
@@ -1011,8 +1031,8 @@ static bool sb_sweep_page0(void)
     cxt_sb_count = cxt_base_count = 0;
     sb_list_count = 0;
     stat_probe_empty = 0;
-    stat_cxt_oob = stat_cxt_self = 0;
-    stat_skipped = 0;
+    stat_cxt_oob = stat_cxt_self = stat_cxt_hole = 0;
+    stat_skipped = stat_btoc_fallback = 0;
 
     prog_phase = "scan";
     prog_total = SB_COUNT * BANKS;
@@ -1252,9 +1272,37 @@ int ftl_recover(void)
 
             prog_found++;
             stat_sbs_closed++;
-            btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
-                        sb_list[i].ce, sb_list[i].cau, sb_list[i].block,
-                        weave);
+
+            /*
+             * A BTOC that parses to nothing must NOT be treated as an empty
+             * superblock.
+             *
+             * btoc_ingest() understands the big-endian layouts and returns 0
+             * for anything else. The Linux side measured what that costs:
+             * 255 of 563 closed superblocks read and then dropped, each one
+             * 127 pages and roughly 2032 LBAs of directory and file data. The
+             * symptom is a map that stops dead at a page boundary and resumes
+             * in an unrelated block -- so reads fail, directories will not
+             * load, and it presents as an invalid cluster chain rather than as
+             * missing data.
+             *
+             * The fix is not another guess at the layout. Every page carries
+             * its own meta, and rebuilding from that is the path open
+             * superblocks already use and the one the whole recovery trusts
+             * when there is no BTOC at all. It is slower for these blocks and
+             * it cannot misread a format it does not recognise, because it
+             * never looks at the BTOC.
+             *
+             * So the BTOC stays the fast path and the per-page walk is the
+             * floor underneath it.
+             */
+            if (btoc_ingest(scratch.data[0], NAND_SLOT_DATA,
+                            sb_list[i].ce, sb_list[i].cau, sb_list[i].block,
+                            weave) == 0) {
+                stat_btoc_fallback++;
+                rebuild_open_sb(sb_list[i].ce, sb_list[i].cau,
+                                sb_list[i].block);
+            }
         } else {
             /*
              * Open, and NEVER skipped regardless of the checkpoint.
@@ -1393,7 +1441,8 @@ uint32_t ftl_disk_sectors(void)
  */
 void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
                        unsigned *replayed, unsigned *dropped,
-                       unsigned *skipped, bool *overflow)
+                       unsigned *skipped, bool *overflow,
+                       unsigned *fallback)
 {
     if (loaded)
         *loaded = cxt_loaded;
@@ -1402,9 +1451,11 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
     if (empty)
         *empty = stat_probe_empty;
     if (dropped)
-        *dropped = stat_cxt_oob + stat_cxt_self;
+        *dropped = stat_cxt_oob + stat_cxt_self;   /* holes are not drops */
     if (skipped)
         *skipped = stat_skipped;
+    if (fallback)
+        *fallback = stat_btoc_fallback;
     if (overflow)
         *overflow = ranges_overflowed;
     if (replayed)
