@@ -18,6 +18,7 @@
  ****************************************************************************/
 #include "config.h"
 #include "system.h"
+#include "kernel.h"
 #include "boot-beacon.h"
 
 /*
@@ -154,4 +155,29 @@ void beacon_probe_usec(void)
 void beacon_mark(uint32_t top)
 {
     beacon_split(top, beacon_verdict);
+}
+
+/*
+ * Does the tick actually advance?
+ *
+ * sleep() blocks until current_tick moves, so if the tick timer is not firing
+ * sleep() never returns -- and any diagnostic that calls it stops the boot at
+ * the exact point it prints. That failure is indistinguishable from the code
+ * it was measuring having hung, which makes it the worst possible bug to have
+ * in an instrument.
+ *
+ * Uses a bare spin, not sleep(), for the same reason beacon_probe_usec() does:
+ * using the thing under test to test itself hangs on precisely the case being
+ * looked for.
+ *
+ * WHITE over GREEN if the tick moved, WHITE over RED if it did not.
+ */
+void beacon_probe_tick(void)
+{
+    long t0 = current_tick;
+
+    beacon_spin(SPIN_SHORT * 16);
+
+    beacon_split(BEACON_WHITE,
+                 (current_tick != t0) ? BEACON_GREEN : BEACON_RED);
 }

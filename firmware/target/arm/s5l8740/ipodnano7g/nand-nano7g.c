@@ -96,7 +96,11 @@ void n31_trace(const char *tag)
         }
     }
 
-    sleep(HZ / 2);
+    /*
+     * No sleep(). beacon_stage() already holds via a bounded spin, and a
+     * diagnostic must never block on the tick -- if the tick is dead, sleep()
+     * turns the instrument into the thing that stops the boot.
+     */
 }
 
 /* Points at the trace counter while the mount is running; NULL after. */

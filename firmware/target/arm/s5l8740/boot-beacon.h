@@ -108,6 +108,9 @@ void beacon_split(uint32_t top, uint32_t bottom);
  */
 void beacon_probe_usec(void);
 
+/* Does the tick advance? sleep() never returns if it does not. */
+void beacon_probe_tick(void);
+
 /*
  * Paint a stage over the latched USEC_TIMER verdict.
  *

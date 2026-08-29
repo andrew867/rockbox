@@ -197,7 +197,6 @@ static void n7g_stage_num(const char *what, int v)
     snprintf(buf, sizeof(buf), "= %d", v);
     lcd_putsxy(4, 36, buf);
     lcd_update();
-    sleep(3 * HZ);
 }
 
 static void n7g_stage(const char *what)
@@ -206,7 +205,6 @@ static void n7g_stage(const char *what)
     lcd_putsxy(4, 4,  "N7G stage");
     lcd_putsxy(4, 20, what);
     lcd_update();
-    sleep(HZ);
 }
 static void init(void);
 /* main(), and various functions called by main() and init() may be
@@ -769,6 +767,15 @@ static void init(void)
          * ORANGE here and CYAN at the top of n31_trace bracket the only gap
          * left.
          */
+        /*
+         * Is the tick alive? This has to be answered before anything trusts
+         * sleep(), and the marker above used to call it -- so if the tick is
+         * dead, that marker was stopping the boot at the exact point it
+         * printed, and every conclusion drawn from "nothing appeared after
+         * it" was about my own instrument rather than the mount.
+         */
+        beacon_probe_tick();
+
         N7G_BEACON(BEACON_ORANGE);
         rc = disk_mount_all();
         CHART("<disk_mount_all");
@@ -786,7 +793,6 @@ static void init(void)
          */
 #ifdef IPOD_NANO7G
         beacon_split(BEACON_WHITE, rc > 0 ? BEACON_GREEN : BEACON_RED);
-        sleep(3 * HZ);
 #endif
         n7g_stage_num("mount rc", rc);
         if (rc<=0)
