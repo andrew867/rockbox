@@ -20,6 +20,7 @@
 #include <string.h>
 #include "config.h"
 #include "system.h"
+#include "pmu-target.h"
 #include "kernel.h"
 #include "gpio-s5l8740.h"
 #include "bcm2078-s5l8740.h"
@@ -188,6 +189,31 @@ bool bcm2078_init(void)
 
     if (bt_up)
         return true;
+
+    /*
+     * Power first, in the right order, with the settle time that goes with it.
+     *
+     * The rail, then the pad, then HCI -- and never the other way round. The
+     * Linux port got exactly this wrong and it is worth recording why, because
+     * the symptom was not obviously about ordering: there, the PMIC arrived as
+     * a module at t=7.1s while the HCI driver sent its vendor baud-rate
+     * command at t=4.87s. The command went out 2.5 seconds before the
+     * controller had power, got no answer, and the radio simply never came up.
+     *
+     * We do not have that split -- one driver owns both halves here -- so the
+     * ordering is a matter of writing it in the right sequence rather than of
+     * negotiating between drivers. Doing it explicitly means it stays correct
+     * if the rail is ever dropped for power saving, instead of working only
+     * because the boot chain happened to leave the rail on.
+     */
+    if (!pmu_bt_rail_enable(true)) {
+        /*
+         * No trustworthy snapshot, so the rail state is unknown rather than
+         * known-bad. Carry on -- it is on from boot unless something took it
+         * down -- but do not pretend this was verified.
+         */
+    }
+    sleep(HZ / 20);
 
     /* sub_570054: pad 70 high powers the controller. */
     gpio_direction_output(GPIO_PAD_BT_POWER, true);

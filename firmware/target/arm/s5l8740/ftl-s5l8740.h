@@ -69,7 +69,7 @@ uint32_t ftl_disk_sectors(void);
 
 /* Diagnostics for the debug screen. */
 void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
-                       unsigned *replayed);
+                       unsigned *replayed, unsigned *dropped);
 const char *ftl_last_phase(void);
 
 void ftl_get_stats(unsigned *ranges, unsigned *mapped, unsigned *sbs_closed,

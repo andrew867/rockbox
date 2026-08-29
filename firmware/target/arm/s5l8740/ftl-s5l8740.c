@@ -110,6 +110,8 @@ static unsigned stat_sbs_closed;
 static unsigned stat_sbs_open;
 static unsigned stat_mapped;
 static unsigned stat_probe_empty;
+static unsigned stat_cxt_oob;       /* extents pointing outside the device */
+static unsigned stat_cxt_self;      /* extents inside a context superblock */
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
@@ -743,7 +745,19 @@ static int cxt_load_l2v(const uint8_t *d, uint64_t weave)
         if (vba == 0xffffffffu || !span)
             break;              /* end of this record */
 
-        if (vba < VBA_LIMIT && !vba_is_cxt(vba))
+        /*
+         * Count what is dropped. A skipped extent is an LBA range that maps
+         * to nothing, and reads of it fail -- which surfaces as "invalid
+         * cluster chain" or a failed directory read, i.e. it looks like a
+         * corrupt disk rather than a specific hole the driver chose to leave.
+         * Dropping is sometimes right (CXT VBAs are context records, not user
+         * data), but it must never be invisible.
+         */
+        if (vba >= VBA_LIMIT)
+            stat_cxt_oob++;
+        else if (vba_is_cxt(vba))
+            stat_cxt_self++;
+        else
             cxt_append(lba, span, vba, weave);
 
         lba += span;
@@ -836,6 +850,7 @@ static bool sb_sweep_page0(void)
     cxt_sb_count = cxt_base_count = 0;
     sb_list_count = 0;
     stat_probe_empty = 0;
+    stat_cxt_oob = stat_cxt_self = 0;
 
     prog_phase = "scan";
     prog_total = SB_COUNT * BANKS;
@@ -1180,7 +1195,7 @@ uint32_t ftl_disk_sectors(void)
  * screen and everything after it is guesswork.
  */
 void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
-                       unsigned *replayed)
+                       unsigned *replayed, unsigned *dropped)
 {
     if (loaded)
         *loaded = cxt_loaded;
@@ -1188,6 +1203,8 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
         *written = sb_list_count;
     if (empty)
         *empty = stat_probe_empty;
+    if (dropped)
+        *dropped = stat_cxt_oob + stat_cxt_self;
     if (replayed)
         *replayed = prog_found;
 }

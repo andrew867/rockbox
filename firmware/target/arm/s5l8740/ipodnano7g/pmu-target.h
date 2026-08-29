@@ -26,6 +26,10 @@
 
 void pmu_init(void);
 
+/* Bluetooth rail: snapshot the boot state, then restore or drop it. */
+void pmu_bt_rail_snapshot(void);
+bool pmu_bt_rail_enable(bool on);
+
 int  pmu_read(int reg);
 int  pmu_write(int reg, unsigned char value);
 

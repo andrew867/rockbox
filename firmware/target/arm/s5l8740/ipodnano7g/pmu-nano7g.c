@@ -78,6 +78,82 @@ int pmu_write(int reg, unsigned char value)
     return i2c_write(PMU_BUS, PMU_ADDR, reg, 1, &value);
 }
 
+/*
+ * The Bluetooth rail.
+ *
+ * Two registers rather than one, which is why it is not in the LDO table:
+ * 0x57 bits 7:6, and 0x58 bit 0 plus bits 6:4. The Linux driver treats it the
+ * same way and for the same reason.
+ *
+ * It is on when we inherit the machine, and the on-values are not something
+ * we can derive -- no RE gives them, and the Linux driver never invents them
+ * either: it snapshots what the boot left and restores exactly that. So this
+ * does the same. Snapshot early, before anything can write over it, and
+ * restore on demand.
+ *
+ * Guessing would be the tempting alternative and it is the wrong one. The
+ * masks cover a voltage or mode selection, so an invented value is not
+ * "probably on", it is an unknown rail setting applied to a radio.
+ */
+#define D1830_REG_BT_A          0x57
+#define D1830_REG_BT_B          0x58
+#define D1830_BT_A_MASK         0xc0
+#define D1830_BT_B_MASK         0x71
+
+static unsigned char bt_saved_a, bt_saved_b;
+static bool bt_saved;
+
+void pmu_bt_rail_snapshot(void)
+{
+    int a, b;
+
+    if (bt_saved)
+        return;
+
+    a = pmu_read(D1830_REG_BT_A);
+    b = pmu_read(D1830_REG_BT_B);
+    if (a < 0 || b < 0)
+        return;
+
+    bt_saved_a = (unsigned char)a;
+    bt_saved_b = (unsigned char)b;
+    bt_saved = true;
+}
+
+/*
+ * Returns false when there is nothing trustworthy to restore, so the caller
+ * can say "rail state unknown" instead of proceeding to talk to a radio that
+ * may have no power. Silence here is what made the Linux failure so hard to
+ * read.
+ */
+bool pmu_bt_rail_enable(bool on)
+{
+    int a, b;
+
+    if (!bt_saved)
+        return false;
+
+    a = pmu_read(D1830_REG_BT_A);
+    b = pmu_read(D1830_REG_BT_B);
+    if (a < 0 || b < 0)
+        return false;
+
+    if (on) {
+        a = (a & ~D1830_BT_A_MASK) | (bt_saved_a & D1830_BT_A_MASK);
+        b = (b & ~D1830_BT_B_MASK) | (bt_saved_b & D1830_BT_B_MASK);
+    } else {
+        a &= ~D1830_BT_A_MASK;
+        b &= ~D1830_BT_B_MASK;
+    }
+
+    if (pmu_write(D1830_REG_BT_A, (unsigned char)a) < 0)
+        return false;
+    if (pmu_write(D1830_REG_BT_B, (unsigned char)b) < 0)
+        return false;
+
+    return true;
+}
+
 void pmu_init(void)
 {
     /*
@@ -89,6 +165,13 @@ void pmu_init(void)
      * proven the rest on glass.
      */
     (void)pmu_read(D1830_REG_STATUS0);
+
+    /*
+     * Capture the Bluetooth rail while it is still exactly as the boot chain
+     * left it. Anything that writes the PMIC later cannot then take the radio
+     * down permanently, because the values to put back are already held.
+     */
+    pmu_bt_rail_snapshot();
 }
 
 int pmu_read_buttons(void)
