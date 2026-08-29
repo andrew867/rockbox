@@ -145,6 +145,11 @@ extern int (*tuner_get)(int setting);
 #include "stfm1000.h"
 #endif
 
+/* Broadcom BCM2078 combo BT+FM, reached over HCI rather than a bus */
+#if (CONFIG_TUNER & BCM2078_TUNER)
+#include "bcm2078_tuner.h"
+#endif
+
 #if defined(SIMULATOR)
 #undef tuner_set
 int tuner_set(int setting, int value);
