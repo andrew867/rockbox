@@ -312,24 +312,43 @@ static void sink_play(const void *addr, size_t size)
     dma_start = addr;
     dma_remaining = size;
 
+    /*
+     * The codec is bracketed around the clocks, and both halves matter.
+     *
+     * Configuration has to happen before the interface runs, and the UNMUTE
+     * has to happen after -- an unmute issued into a dead clock leaves a
+     * codec whose every register reads back correctly and which makes no
+     * sound. That was the old failure here, and it was dressed up as an ASP
+     * lock handshake on a status bit the stock firmware never reads.
+     */
+#ifdef HAVE_CS42L81
+    cs42l81_play_prepare(cur_rate);
+    cs42l81_pre_iis_start();
+#endif
+
     iis0_program(cur_rate);
     pcm_dma_arm();
     iis0_tx_kick();
 
-    /*
-     * Only now are BCLK and LRCLK actually running, so this is the first
-     * moment the codec can lock its serial port. Doing it at codec init --
-     * against a dead clock -- completes every register write and achieves
-     * nothing, which is the leading explanation for the Linux silence.
-     */
 #ifdef HAVE_CS42L81
-    if (!cs42l81_asp_is_locked())
-        cs42l81_asp_lock();
+    /* BCLK and LRCLK are running only now. */
+    cs42l81_play_start();
+    cs42l81_post_iis_start();
 #endif
 }
 
 static void sink_stop(void)
 {
+#ifdef HAVE_CS42L81
+    /*
+     * Transport stop only -- sub_42D364(0). Deliberately NOT the D3280(4)
+     * standby: that is a full analog power-down, and running it on every PCM
+     * stop is unrecoverable, because prepare early-returns when the rate has
+     * not changed and so never re-runs the power-up. The first tone plays and
+     * every one after it is silent.
+     */
+    cs42l81_play_stop();
+#endif
     iis0_tx_stop();
     dma_remaining = 0;
 }

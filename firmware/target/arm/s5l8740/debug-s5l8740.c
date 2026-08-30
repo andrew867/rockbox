@@ -174,13 +174,18 @@ bool dbg_audio(void)
         line++;
 
 #ifdef HAVE_CS42L81
-        lcd_putsf(0, line++, "CS42 lock=%d 002f=%02x", rt.locked, rt.r002f);
+        lcd_putsf(0, line++, "CS42 %uHz play=%d m38=%02x",
+                  rt.rate, rt.playing, rt.mode38);
+        lcd_putsf(0, line++, "002f=%02x (b7=ready)", rt.r002f);
         lcd_putsf(0, line++, "0401=%02x 0403=%02x 0404=%02x",
                   rt.r0401, rt.r0403, rt.r0404);
         lcd_putsf(0, line++, "0500=%02x 0527=%02x 054f=%02x",
                   rt.r0500, rt.r0527, rt.r054f);
         lcd_putsf(0, line++, "0075=%02x 0220=%02x", rt.r0075, rt.r0220);
-        lcd_putsf(0, line++, "(0527: 60=play ff=mute)");
+        lcd_putsf(0, line++, "gain=%02x 528=%02x", rt.r0227, rt.status_528);
+        lcd_putsf(0, line++, "2v5: c96f=%02x 219=%02x", rt.rc96f, rt.r0219);
+        lcd_putsf(0, line++, "(0527 60=play ff=mute)");
+        lcd_putsf(0, line++, "(c96f 1e=rail up 0e=down)");
 #endif
         line++;
 
