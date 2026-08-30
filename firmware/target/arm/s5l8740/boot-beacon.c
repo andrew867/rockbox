@@ -178,6 +178,29 @@ void beacon_probe_tick(void)
 
     beacon_spin(SPIN_SHORT * 16);
 
-    beacon_split(BEACON_WHITE,
-                 (current_tick != t0) ? BEACON_GREEN : BEACON_RED);
+    if (current_tick != t0) {
+        beacon_split(BEACON_WHITE, BEACON_GREEN);
+        return;
+    }
+
+    /*
+     * Dead tick. Say so unambiguously and forever.
+     *
+     * A static red screen is indistinguishable from any other stopped boot --
+     * and "stopped boot" is exactly the thing that has been misread here half
+     * a dozen times. Flashing cannot be mistaken for a hang: something is
+     * still executing, and it is saying one specific thing.
+     *
+     * It does not return, because there is nothing useful past this point. If
+     * the tick is dead then sleep() never returns, every queue_wait() blocks
+     * forever, no thread is ever scheduled, and Rockbox cannot run at all --
+     * so the first sleep() after this would hang anyway, just silently and
+     * somewhere that looks like a different bug.
+     */
+    for (;;) {
+        beacon_fill(BEACON_RED);
+        beacon_spin(SPIN_SHORT * 4);
+        beacon_fill(BEACON_BLACK);
+        beacon_spin(SPIN_SHORT * 4);
+    }
 }

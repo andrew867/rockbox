@@ -596,6 +596,17 @@ static void init(void)
      */
     N7G_BEACON(BEACON_BLUE);
 
+    /*
+     * Settle the tick here, before anything depends on it.
+     *
+     * Everything downstream blocks on it: sleep(), queue_wait(), every thread
+     * switch. dircache_enable() polls with sleep(0), and my own stage markers
+     * called sleep(HZ) -- so a dead tick stops the boot at whatever line
+     * happens to sleep first, which looks like a bug in that line. It has
+     * looked like a bug in five different lines so far.
+     */
+    beacon_probe_tick();
+
 #if defined(HAVE_BOOTDATA) && !defined(BOOTLOADER)
     verify_boot_data();
 #endif
@@ -805,8 +816,6 @@ static void init(void)
          * printed, and every conclusion drawn from "nothing appeared after
          * it" was about my own instrument rather than the mount.
          */
-        beacon_probe_tick();
-
         N7G_BEACON(BEACON_ORANGE);
         rc = disk_mount_all();
         CHART("<disk_mount_all");
