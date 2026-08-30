@@ -43,6 +43,21 @@
 /* define this if you have access to the quickscreen */
 #define HAVE_QUICKSCREEN
 
+/*
+ * Build the filesystem caches behind the UI instead of before it.
+ *
+ * Both dircache and tagcache already do their work in background threads --
+ * main.c simply waited for them, with a splash. On this target every read
+ * goes through a read-only Whimory FTL with 4096-byte sectors, so a full
+ * filesystem walk at boot is the difference between a usable device and one
+ * that looks like it has hung.
+ *
+ * Neither is needed to browse or play. dircache is a lookup accelerator that
+ * callers fall through past until it is ready, and the database browser
+ * reports itself unready until tagcache commits.
+ */
+#define N31_ASYNC_FS_CACHES
+
 /* define this if you would like tagcache to build on this target */
 #define HAVE_TAGCACHE
 

@@ -390,11 +390,32 @@ static int INIT_ATTR init_dircache(bool preinit)
         {
             if (result > 0)
             {
+#ifdef N31_ASYNC_FS_CACHES
+                /*
+                 * Let it build behind the UI.
+                 *
+                 * dircache_enable() has ALREADY started a background thread at
+                 * PRIORITY_BACKGROUND -- the scan was never synchronous. This
+                 * block just chose to block on it so it could show a
+                 * "Scanning disk..." splash and a tidy logo afterwards.
+                 *
+                 * On a target whose every read goes through a read-only FTL
+                 * with 4096-byte sectors, that wait is the difference between
+                 * a usable device and a boot that appears to have stopped.
+                 * Rockbox does not need the cache to browse or play: it is a
+                 * lookup accelerator, and callers fall through to real
+                 * directory reads until it is ready.
+                 *
+                 * dircache_get_info() below reads a size that is still
+                 * growing, which only makes the saved size hint conservative.
+                 */
+#else
                 /* Print "Scanning disk..." to the display. */
                 splash(0, str(LANG_SCANNING_DISK));
                 dircache_wait();
                 backlight_on();
                 show_logo_boot();
+#endif
             }
 
             struct dircache_info info;
@@ -418,6 +439,16 @@ static void init_tagcache(void)
     long talked_tick = 0;
 #endif
     tagcache_init();
+
+#ifdef N31_ASYNC_FS_CACHES
+    /*
+     * Same reasoning as dircache: tagcache_init() starts the commit in its own
+     * thread and this loop only waits for it, drawing progress. The database
+     * browser reports itself unready until the commit finishes, so nothing
+     * needs the wait -- it is a boot-time courtesy that costs the whole boot.
+     */
+    return;
+#endif
 
     while (!tagcache_is_initialized())
     {
