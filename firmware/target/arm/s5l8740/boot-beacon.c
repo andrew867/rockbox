@@ -184,23 +184,53 @@ void beacon_probe_tick(void)
     }
 
     /*
-     * Dead tick. Say so unambiguously and forever.
+     * Dead. Walk the chain and report each link as its own colour, because
+     * "the tick does not fire" has four independent causes and they need
+     * completely different fixes:
      *
-     * A static red screen is indistinguishable from any other stopped boot --
-     * and "stopped boot" is exactly the thing that has been misread here half
-     * a dozen times. Flashing cannot be mistaken for a hang: something is
-     * still executing, and it is saying one specific thing.
+     *   RED    does Timer B count at all?          TBCNT moves
+     *   YELLOW does it raise its interrupt line?   VIC0RAWINTR bit 7
+     *   CYAN   is that line unmasked in the VIC?   VIC0INTENABLE bit 7
+     *   WHITE  are IRQs enabled at the CPU?        CPSR I bit clear
      *
-     * It does not return, because there is nothing useful past this point. If
-     * the tick is dead then sleep() never returns, every queue_wait() blocks
-     * forever, no thread is ever scheduled, and Rockbox cannot run at all --
-     * so the first sleep() after this would hang anyway, just silently and
-     * somewhere that looks like a different bug.
+     * Green underneath means that link is good, red means it is where the
+     * chain breaks. The first red band is the answer.
+     *
+     * Everything here is a bare read or a bounded spin -- nothing waits on
+     * the thing being measured.
      */
-    for (;;) {
-        beacon_fill(BEACON_RED);
+    {
+        uint32_t c0 = TBCNT;
+        uint32_t cpsr;
+        bool counts, raw = false, unmasked, irqs_on;
+        unsigned i;
+
         beacon_spin(SPIN_SHORT * 4);
-        beacon_fill(BEACON_BLACK);
-        beacon_spin(SPIN_SHORT * 4);
+        counts = (TBCNT != c0);
+
+        for (i = 0; i < 2000; i++) {
+            if (VIC0RAWINTR & (1u << IRQ_TIMER)) {
+                raw = true;
+                break;
+            }
+            beacon_spin(256);
+        }
+
+        unmasked = (VIC0INTENABLE & (1u << IRQ_TIMER)) != 0;
+
+        asm volatile ("mrs %0, cpsr" : "=r"(cpsr));
+        irqs_on = !(cpsr & (1u << 7));      /* I bit clear = IRQs enabled */
+
+        for (;;) {
+            beacon_split(BEACON_RED,    counts   ? BEACON_GREEN : BEACON_RED);
+            beacon_spin(SPIN_SHORT * 6);
+            beacon_split(BEACON_YELLOW, raw      ? BEACON_GREEN : BEACON_RED);
+            beacon_spin(SPIN_SHORT * 6);
+            beacon_split(BEACON_CYAN,   unmasked ? BEACON_GREEN : BEACON_RED);
+            beacon_spin(SPIN_SHORT * 6);
+            beacon_split(BEACON_WHITE,  irqs_on  ? BEACON_GREEN : BEACON_RED);
+            beacon_spin(SPIN_SHORT * 6);
+        }
     }
+
 }
