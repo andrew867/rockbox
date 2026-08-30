@@ -175,13 +175,55 @@ static void iis0_pads(void)
 }
 
 /* CLKCON+0x30 carries the audio parent selection as a whole dword. */
+/*
+ * Touch only the audio bits.
+ *
+ * This used to stamp CLKCON_AUDIO_PLAY or CLKCON_AUDIO_IDLE over the whole
+ * register. Those two constants are whole-system clock SNAPSHOTS captured
+ * from RetailOS, and writing one back wholesale clears every gate that was
+ * not set in the snapshot -- for peripherals that have nothing to do with
+ * audio and were perfectly happy until playback started.
+ *
+ * The Linux port found this the hard way: after a play, the NAND controller
+ * read back FMCTRL0 = 0 and NANDSTAT = 0. The FMSS block had been clock-gated
+ * off, so storage "broke randomly" -- on a play/stop transition, every time.
+ *
+ * Stock does not do this. sub_41CBD8 is a single-bit read-modify-write that
+ * preserves everything else, which is the whole point of a gate register:
+ * the bits belong to different owners.
+ *
+ * So only the bits that actually differ between the two snapshots are
+ * touched, and the rest of the register is left exactly as found.
+ */
+#define CLKCON_AUDIO_MASK   (CLKCON_AUDIO_PLAY ^ CLKCON_AUDIO_IDLE)
+
 static void iis_audio_clock(bool playing)
 {
-    *(REG32_PTR_T)(CLKCON_BASE + CLKCON_AUDIO_OFF) =
-        playing ? CLKCON_AUDIO_PLAY : CLKCON_AUDIO_IDLE;
+    volatile uint32_t *reg = (REG32_PTR_T)(CLKCON_BASE + CLKCON_AUDIO_OFF);
+    uint32_t want = playing ? CLKCON_AUDIO_PLAY : CLKCON_AUDIO_IDLE;
+
+    *reg = (*reg & ~CLKCON_AUDIO_MASK) | (want & CLKCON_AUDIO_MASK);
 }
 
 /* OSOS sub_26DDDE: program the interface, leaving TX stopped. */
+/*
+ * IIS0 is the MASTER; the codec is slave on both clocks.
+ *
+ * The codec is SND_SOC_DAIFMT_CBS_CFS -- bit-clock slave, frame slave -- and
+ * nothing on the codec programs that, because slave is the part's default.
+ * So BCLK and LRCLK exist only because this function makes them: I2SCLKDIV
+ * divides MCLK (12 MHz) down to the frame rate, which is why 44.1 kHz is
+ * divisor 272.
+ *
+ * Two values here are worth not "tidying":
+ *
+ *   I2SCLKDIV is at +0x40, NOT the +0x24 the Rockbox s5l8702 driver uses.
+ *   Writing +0x24 on this part sets no divider at all.
+ *
+ *   I2STXCON is 0x03100099 -- internal clock source, 16-bit. The s5l8702
+ *   driver's 0x0B100019 is a different clock source and the Linux port names
+ *   it outright as poison: it sticks the SRC and the jack stays silent.
+ */
 static void iis0_program(unsigned int rate)
 {
     iis_audio_clock(true);

@@ -904,14 +904,34 @@ void audiohw_mute(bool mute)
 
 /*
  * Called by the PCM driver immediately BEFORE the IIS clocks start.
- * Drops the ASP enable so the interface is not running into a codec that is
- * still being configured.
+ *
+ * Deliberately does nothing to 0x000F.
+ *
+ * An earlier version dropped bit 7 here, described as "so the interface is
+ * not running into a codec that is still being configured". That is the
+ * of_asp_slave experiment from the Linux driver, and it is off by default
+ * there -- in the configuration that actually makes sound, bit 7 stays SET
+ * from D3280(3), which raises it on purpose.
+ *
+ * Clearing it drops the ASP enable immediately before the clocks arrive,
+ * which is a good way to hand a running interface to a serial port that is
+ * switched off.
+ *
+ * The master/slave contract needs nothing from this end either. The codec is
+ * SND_SOC_DAIFMT_CBS_CFS -- bit-clock slave and frame slave -- and the Linux
+ * codec driver has no set_fmt at all, because slave is the part's default
+ * rather than something programmed. BCLK and LRCLK are SoC-driven: IIS0 is
+ * the master, and I2SCLKDIV at +0x40 is what divides MCLK down to the frame
+ * rate. See iis0_program() in pcm-s5l8740.c.
+ *
+ * The hook is kept because the ordering it marks is real -- configuration
+ * before clocks, unmute after -- and because a future part of the sequence
+ * may need to land here.
  */
 void cs42l81_pre_iis_start(void)
 {
     if (!cs42_up)
         return;
-    cs42_rmw(CS42_R000F, 0x80, 0x00);
 }
 
 /*
