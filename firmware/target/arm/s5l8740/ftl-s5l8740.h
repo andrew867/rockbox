@@ -72,7 +72,8 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
                        unsigned *replayed, unsigned *dropped,
                        unsigned *skipped, bool *overflow,
                        unsigned *fallback, unsigned *form0,
-                       unsigned *form1, unsigned *readfail);
+                       unsigned *form1, unsigned *readfail,
+                       unsigned *bpb_cands, bool *bpb_fatsig);
 const char *ftl_last_phase(void);
 
 void ftl_get_stats(unsigned *ranges, unsigned *mapped, unsigned *sbs_closed,

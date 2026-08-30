@@ -126,6 +126,8 @@ static unsigned stat_skipped;       /* closed SBs the checkpoint already covers 
 static unsigned stat_btoc_fallback; /* closed SBs whose BTOC parsed to nothing */
 static unsigned stat_btoc_form[2];  /* [0] plain record array, [1] 8-byte header */
 static unsigned stat_sweep_readfail; /* page 0 unreadable; replayed anyway */
+static unsigned stat_bpb_cands;     /* headers that looked like a BPB */
+static bool     stat_bpb_fatsig;    /* the chosen one had a real FAT */
 
 static const char *prog_phase = "idle";
 static unsigned prog_cur, prog_total;
@@ -205,10 +207,19 @@ static void map_add(uint32_t lba, uint32_t vba, uint64_t weave)
             return;     /* stale write, correctly ignored */
 
         /*
-         * A newer write to an LBA inside an existing range splits it. Rather
-         * than doing that surgery, shrink the existing range to the part
-         * before this LBA and insert the rest fresh -- simpler, and the
-         * coalescing pass below stitches contiguous survivors back together.
+         * A newer write to an LBA inside an existing range splits that range
+         * in two, and BOTH halves have to survive.
+         *
+         * This used to truncate at the split point with the comment "let the
+         * tail be re-added". Nothing re-adds it. Every LBA after the split was
+         * silently dropped from the map, and a dropped LBA is not an error --
+         * reads of it simply fail, which surfaces much later as an unreadable
+         * file or an invalid cluster chain and looks like disk corruption
+         * rather than a range that was thrown away.
+         *
+         * Splitting properly is a few lines. The head keeps its start and vba;
+         * the tail starts one LBA past the hit with its vba advanced to match,
+         * and inherits the weave, because it is the same write.
          */
         if (lba == r->start) {
             r->start++;
@@ -222,8 +233,29 @@ static void map_add(uint32_t lba, uint32_t vba, uint64_t weave)
         } else if (lba == r->start + r->len - 1) {
             r->len--;
         } else {
-            /* Interior hit: truncate here and let the tail be re-added. */
-            r->len = lba - r->start;
+            uint32_t head_len  = lba - r->start;
+            uint32_t tail_len  = r->len - head_len - 1;
+            uint32_t tail_lba  = lba + 1;
+            uint32_t tail_vba  = r->vba + head_len + 1;
+            uint64_t tail_weav = r->weave;
+
+            r->len = head_len;
+
+            if (tail_len) {
+                if (range_count < MAX_RANGES) {
+                    memmove(&ranges[idx + 2], &ranges[idx + 1],
+                            (range_count - idx - 1) * sizeof(ranges[0]));
+                    ranges[idx + 1].start = tail_lba;
+                    ranges[idx + 1].len   = tail_len;
+                    ranges[idx + 1].vba   = tail_vba;
+                    ranges[idx + 1].weave = tail_weav;
+                    range_count++;
+                } else {
+                    /* No room for the tail: say so rather than lose it
+                     * quietly, which is the whole point of this fix. */
+                    ranges_overflowed = true;
+                }
+            }
         }
     }
 
@@ -626,41 +658,104 @@ static bool bpb_looks_valid(const uint8_t *sec)
     return true;
 }
 
+/* Defined with the CXT loader below; the BPB check needs it up here. */
+static uint32_t rd32le(const uint8_t *p);
+
+/*
+ * Does the FAT itself start where this BPB says it does?
+ *
+ * This is the check that separates two BPBs that both look perfect.
+ *
+ * A stale copy of the volume header stays a well-formed BPB forever: sector 0
+ * is found by content and is static, so it reads back valid no matter how out
+ * of date it is. Reading sectors and confirming they read tells you nothing --
+ * the Linux port scored two candidates 9/9 on exactly that test, picked the
+ * newer one, and had the whole volume six sectors out. Sector 0 and the
+ * FSInfo both validated; the FAT belonged to the other one, so vfat walked
+ * into the middle of the table.
+ *
+ * The one thing a stale header cannot fake is the FAT it points at. Every
+ * FAT32 opens with entry 0 = the media descriptor in the low byte and the
+ * rest ones, and entry 1 = all ones, masked to the 28 bits FAT32 entries
+ * actually carry. Point that at the wrong sector and it is not a FAT.
+ */
+static bool fat_first_sector_ok(uint32_t bpb_lba, const uint8_t *bpb)
+{
+    static uint8_t fat[NAND_SLOT_DATA];
+    unsigned reserved = bpb[14] | (bpb[15] << 8);
+    uint8_t media = bpb[21];
+    uint32_t e0, e1;
+
+    if (!reserved)
+        return false;
+    if (ftl_read_fmss_lba(bpb_lba + reserved, fat))
+        return false;
+
+    e0 = rd32le(fat) & 0x0fffffffu;
+    e1 = rd32le(fat + 4) & 0x0fffffffu;
+
+    return e0 == (0x0fffff00u | media) && e1 == 0x0fffffffu;
+}
+
 static bool find_fat_base(void)
 {
     static uint8_t sec[NAND_SLOT_DATA];
+    uint32_t fallback = 0;
+    bool have_fallback = false;
     unsigned i;
 
     /*
-     * The BPB is at the start of the volume, so it is the first mapped LBA
-     * whose contents look like one. Walking ranges rather than raw LBAs keeps
-     * this to a handful of reads.
+     * Walk the ranges looking for a volume header, and prefer one whose FAT
+     * is really there. Walking ranges rather than raw LBAs keeps this to a
+     * handful of reads.
      */
     for (i = 0; i < range_count; i++) {
         uint32_t lba = ranges[i].start;
 
         if (ftl_read_fmss_lba(lba, sec))
             continue;
+        if (!bpb_looks_valid(sec))
+            continue;
 
-        if (bpb_looks_valid(sec)) {
-            fat_base_lba = lba;
+        stat_bpb_cands++;
 
+        if (!fat_first_sector_ok(lba, sec)) {
             /*
-             * Everything mapped from here on is the volume. This is an
-             * upper bound rather than the FAT's own total-sector field,
-             * which is the honest thing to report when the map may be
-             * incomplete.
+             * Looks like a BPB, does not point at a FAT. Almost certainly a
+             * stale header. Remember it in case nothing better turns up --
+             * mounting on a doubtful candidate is still better than refusing
+             * to mount -- but keep looking.
              */
-            {
-                const struct ftl_range *last = &ranges[range_count - 1];
-
-                disk_sector_count = (last->start + last->len) - fat_base_lba;
+            if (!have_fallback) {
+                fallback = lba;
+                have_fallback = true;
             }
-            return true;
+            continue;
         }
+
+        fat_base_lba = lba;
+        stat_bpb_fatsig = true;
+        goto found;
     }
 
-    return false;
+    if (!have_fallback)
+        return false;
+
+    fat_base_lba = fallback;
+    stat_bpb_fatsig = false;
+
+found:
+    /*
+     * Everything mapped from here on is the volume. This is an upper bound
+     * rather than the FAT's own total-sector field, which is the honest thing
+     * to report when the map may be incomplete.
+     */
+    {
+        const struct ftl_range *last = &ranges[range_count - 1];
+
+        disk_sector_count = (last->start + last->len) - fat_base_lba;
+    }
+    return true;
 }
 
 /*
@@ -1118,6 +1213,8 @@ static bool sb_sweep_page0(void)
     stat_skipped = stat_btoc_fallback = 0;
     stat_btoc_form[0] = stat_btoc_form[1] = 0;
     stat_sweep_readfail = 0;
+    stat_bpb_cands = 0;
+    stat_bpb_fatsig = false;
 
     prog_phase = "scan";
     prog_total = SB_COUNT * BANKS;
@@ -1584,7 +1681,8 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
                        unsigned *replayed, unsigned *dropped,
                        unsigned *skipped, bool *overflow,
                        unsigned *fallback, unsigned *form0,
-                       unsigned *form1, unsigned *readfail)
+                       unsigned *form1, unsigned *readfail,
+                       unsigned *bpb_cands, bool *bpb_fatsig)
 {
     if (loaded)
         *loaded = cxt_loaded;
@@ -1604,6 +1702,10 @@ void ftl_get_cxt_stats(bool *loaded, unsigned *written, unsigned *empty,
         *form1 = stat_btoc_form[1];
     if (readfail)
         *readfail = stat_sweep_readfail;
+    if (bpb_cands)
+        *bpb_cands = stat_bpb_cands;
+    if (bpb_fatsig)
+        *bpb_fatsig = stat_bpb_fatsig;
     if (overflow)
         *overflow = ranges_overflowed;
     if (replayed)
