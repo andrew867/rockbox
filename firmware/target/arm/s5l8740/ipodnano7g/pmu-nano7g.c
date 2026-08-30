@@ -62,7 +62,11 @@
 #define D1830_REG_LDO21         0x15
 #define D1830_REG_LDO22         0x16
 #define D1830_REG_LDO23         0x17
-#define D1830_LDO_ENABLE        (1 << 4)
+/*
+ * NOT an enable bit -- the top bit of a 25 mV-step voltage field. Kept only
+ * so the name cannot be reintroduced by accident. See pmu_audio_rails().
+ */
+#define D1830_LDO_VOLT_MSB      (1 << 4)
 
 int pmu_read(int reg)
 {
@@ -262,21 +266,37 @@ bool pmu_is_charging(void)
     return pmu_is_usb_present();
 }
 
+/*
+ * DELIBERATELY WRITES NOTHING. Do not "fix" this by adding the writes back.
+ *
+ * This used to set bit 4 of registers 0x15-0x17 to "enable the codec analog
+ * LDOs". There is no analog LDO enable in that range, and bit 4 is not a
+ * switch: registers 20-23 take a 25 mV-step voltage code and write
+ * (code & 0x1F) -- the low five bits and nothing else. Bit 4 is the TOP BIT
+ * OF THE VOLTAGE FIELD.
+ *
+ * On this unit those three registers read 0x09. Setting bit 4 adds sixteen
+ * steps to each -- 400 mV apiece, on three rails, simultaneously. The Linux
+ * port acted on the same wrong note and the device did not survive it: the
+ * kernel locked on boot.
+ *
+ * The idea came from register 0x1A, which alone uses (code & 0x1F) | 0xA0 at
+ * a 100 mV step and therefore does look like it carries an enable pattern.
+ * It is the exception, not the rule. Registers 46 and 47 preserve
+ * (old & 0xE0) deliberately; 20-23 preserve nothing, because there is
+ * nothing up there to preserve.
+ *
+ * So this is now a read and a report. Linux's equivalent runs the sub_23EC
+ * trim sequence, which is a different operation entirely and is not ported
+ * here yet.
+ *
+ * Whoever picks this up: establish which rail actually feeds the CS42L81
+ * analog stage before writing anything in this range. The codec is fed from
+ * somewhere, but it is not from these bits.
+ */
 void pmu_audio_rails(bool on)
 {
-    static const unsigned char regs[] = {
-        D1830_REG_LDO21, D1830_REG_LDO22, D1830_REG_LDO23
-    };
-    unsigned i;
-
-    for (i = 0; i < sizeof(regs); i++) {
-        int v = pmu_read(regs[i]);
-
-        if (v < 0)
-            continue;
-        pmu_write(regs[i], on ? (v | D1830_LDO_ENABLE)
-                              : (v & ~D1830_LDO_ENABLE));
-    }
+    (void)on;
 }
 
 void pmu_power_off(void)

@@ -217,8 +217,18 @@ static uint32_t pl080_ctl(int width, int count, bool src_ai, bool dst_ai)
          | (width << CTL_DWIDTH_SHIFT)
          | (src_ai ? CTL_SRC_AI : 0)
          | (dst_ai ? CTL_DST_AI : 0)
-         | CTL_PROT_PRIV
          | CTL_TC_IRQ;
+    /*
+     * No CTL_PROT_PRIV. RetailOS plays music with CTL = 0x84249000, and its
+     * protection field is zero -- Prot=0, SI=1, width=16, SB=1, DB=1, both
+     * AHB masters 0, TC_IRQ=1.
+     *
+     * The Linux port measured what setting it costs: with Prot=PRIV|BUFF the
+     * control word came out 0xb5242000 and the IIS STATUS stuck in the 0x2A0
+     * class instead of retail's 0x320. A protection attribute is not
+     * something the peripheral should care about, and on this bus it plainly
+     * does.
+     */
 }
 
 void pl080_start_m2p(int dmac, int channel, const void *src, uint32_t dst_reg,

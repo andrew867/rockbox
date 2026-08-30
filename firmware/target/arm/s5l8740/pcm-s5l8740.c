@@ -276,7 +276,16 @@ static void pcm_dma_arm(void)
     pl080_start_m2p(IIS0_DMAC, tx_channel,
                     S5L8740_UNCACHED_ADDR(dma_start),
                     IIS0_TX_FIFO,
-                    PL080_PERI_IIS0_TX, PL080_WIDTH_32, chunk / 4);
+                    PL080_PERI_IIS0_TX, PL080_WIDTH_16, chunk / 2);
+    /*
+     * 16-bit beats, not 32.
+     *
+     * RetailOS plays music with width=16 on both sides of the transfer, and
+     * IIS0 is programmed 16-bit here too -- I2STXCON 0x03100099 carries the
+     * 16-bit field. Moving 32-bit beats into a 16-bit serialiser is a
+     * mismatch between the two halves of the same path, and the FIFO does not
+     * report it: it just clocks out something other than what was written.
+     */
 
     dma_start = (const char *)dma_start + chunk;
     dma_remaining -= chunk;
